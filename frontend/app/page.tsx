@@ -7,6 +7,12 @@ import type { CalculateResponse, InterpretResponse, ConcernType } from '@/types'
 import { calculateSaju, interpretSaju } from '@/lib/api';
 
 export default function Home() {
+  const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주퀸';
+  const BRAND_TAGLINE = process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? '당신의 사주를 한 번에 정리해드려요';
+
+  const getTodayKst = () =>
+    new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }); // YYYY-MM-DD
+
   const [step, setStep] = useState<'input' | 'loading' | 'result'>('input');
   const [calculateResult, setCalculateResult] = useState<CalculateResponse | null>(null);
   const [interpretResult, setInterpretResult] = useState<InterpretResponse | null>(null);
@@ -38,13 +44,15 @@ export default function Home() {
       });
       setCalculateResult(calcResult);
 
-      // 2. 사주 해석
+      // 2. 사주 해석 (오늘 날짜 자동 삽입 → 연도 착각 방지)
+      const todayKst = getTodayKst();
+      const questionWithDate = `${formData.question}\n\n(기준일: ${todayKst} KST)`;
       const interpResult = await interpretSaju({
         saju_result: calcResult,
         name: formData.name,
         gender: formData.gender,
         concern_type: formData.concernType,
-        question: formData.question,
+        question: questionWithDate,
       });
       setInterpretResult(interpResult);
 
@@ -68,14 +76,9 @@ export default function Home() {
       {/* Header */}
       <header className="text-center py-8">
         <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-amber-500 bg-clip-text text-transparent mb-3">
-          🔮 AI 사주
+          🔮 {BRAND_NAME}
         </h1>
-        <p className="text-gray-600 text-lg">
-          인공지능이 분석하는 당신의 운명
-        </p>
-        <p className="text-sm text-gray-400 mt-2">
-          절기 기준 정밀 계산 · 2시간 단위 시주 분석
-        </p>
+        <p className="text-slate-700 text-lg">{BRAND_TAGLINE}</p>
       </header>
 
       {/* Error Message */}
@@ -101,13 +104,8 @@ export default function Home() {
       {step === 'loading' && (
         <div className="flex flex-col items-center justify-center py-20 animate-fade-in-up">
           <div className="w-16 h-16 border-4 border-purple-200 border-t-purple-600 rounded-full animate-spin mb-6" />
-          <p className="text-xl font-medium text-gray-700">사주를 분석중입니다...</p>
-          <p className="text-gray-500 mt-2">절기 기준으로 정밀 계산 중 🌟</p>
-          <div className="mt-4 text-sm text-gray-400">
-            <p>• 연주: 입춘 기준 보정</p>
-            <p>• 월주: 절기(입절) 기준 계산</p>
-            <p>• 시주: 2시간 단위 범위 적용</p>
-          </div>
+          <p className="text-xl font-medium text-slate-700">사주를 분석중입니다...</p>
+          <p className="text-slate-500 mt-2">잠시만 기다려 주세요 🌟</p>
         </div>
       )}
 

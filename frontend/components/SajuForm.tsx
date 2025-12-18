@@ -48,7 +48,7 @@ export default function SajuForm({ onSubmit }: SajuFormProps) {
       birthMinute: 0,
       gender,
       concernType,
-      question: question || '올해 전반적인 운세가 궁금합니다.',
+      question: question || '지금부터 12개월(앞으로 1년) 전반적인 흐름이 궁금합니다.',
     });
   };
 

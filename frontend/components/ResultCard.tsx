@@ -15,6 +15,8 @@ export default function ResultCard({
   interpretResult,
   onReset,
 }: ResultCardProps) {
+  const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주퀸';
+  
   const [activeTab, setActiveTab] = useState<'summary' | 'detail' | 'action'>('summary');
   const [showBoundaryModal, setShowBoundaryModal] = useState(false);
 
@@ -33,12 +35,12 @@ export default function ResultCard({
   };
 
   const doShare = async () => {
-    const shareText = `🔮 AI 사주 결과\n\n${interpretResult.summary}\n\n✨ ${interpretResult.blessing}`;
+    const shareText = `🔮 ${BRAND_NAME} 결과\n\n${interpretResult.summary}\n\n✨ ${interpretResult.blessing}`;
     
     if (navigator.share) {
       try {
         await navigator.share({
-          title: 'AI 사주 결과',
+          title: `${BRAND_NAME} 결과`,
           text: shareText,
         });
       } catch (err) {
