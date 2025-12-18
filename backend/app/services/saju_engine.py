@@ -1,6 +1,7 @@
 """
 사주 계산 엔진 (API 래퍼)
 - engine_v2.py의 검증된 천문학 기반 엔진 사용
+- KASI API (Source of Truth) + ephem (Fallback)
 - API 응답 형식에 맞게 변환
 """
 from typing import Optional
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from app.models.schemas import Pillar, SajuWonGuk, DaeunInfo, QualityInfo
 from app.services.engine_v2 import (
     ScientificSajuEngine, 
+    SajuManager,
     scientific_engine, 
     CalculationError,
     EPHEM_AVAILABLE,
@@ -18,6 +20,7 @@ from app.services.engine_v2 import (
     JI_TO_ELEMENT,
     DAY_MASTER_DESC
 )
+from app.config import get_settings
 
 
 @dataclass
@@ -34,7 +37,10 @@ class CalculationResult:
 class SajuEngine:
     """
     사주 계산 엔진 (API 래퍼)
-    - 내부적으로 engine_v2.py의 천문학 기반 엔진 사용
+    
+    두 가지 모드:
+    1. 동기 모드: calculate() - ephem만 사용 (기존 호환)
+    2. 비동기 모드: calculate_async() - KASI → ephem fallback (권장)
     """
     
     def __init__(self):
@@ -43,7 +49,12 @@ class SajuEngine:
                 "ephem 라이브러리가 필요합니다.\n"
                 "설치: pip install ephem"
             )
+        
         self.engine = scientific_engine
+        
+        # KASI API 통합 매니저
+        settings = get_settings()
+        self.manager = SajuManager(kasi_api_key=settings.kasi_api_key)
     
     def calculate(
         self,
@@ -57,10 +68,7 @@ class SajuEngine:
         use_solar_time: bool = True
     ) -> CalculationResult:
         """
-        사주 계산 메인 함수
-        
-        Args:
-            use_solar_time: 태양시 보정 (-30분) 적용 여부
+        동기 사주 계산 (ephem only - 기존 호환)
         """
         
         # 천문학 엔진으로 계산
@@ -72,6 +80,47 @@ class SajuEngine:
             minute=minute,
             use_solar_time=use_solar_time
         )
+        
+        return self._to_calculation_result(result, hour, gender, timezone)
+    
+    async def calculate_async(
+        self,
+        year: int,
+        month: int,
+        day: int,
+        hour: Optional[int] = None,
+        minute: int = 0,
+        gender: Optional[str] = None,
+        timezone: str = "Asia/Seoul",
+        use_solar_time: bool = True
+    ) -> CalculationResult:
+        """
+        비동기 사주 계산 (KASI → ephem fallback) - 권장
+        
+        Source of Truth 우선순위:
+        1. KASI API (한국천문연구원)
+        2. ephem (NASA JPL) - Fallback
+        """
+        
+        result = await self.manager.calculate(
+            year=year,
+            month=month,
+            day=day,
+            hour=hour,
+            minute=minute,
+            use_solar_time=use_solar_time
+        )
+        
+        return self._to_calculation_result(result, hour, gender, timezone)
+    
+    def _to_calculation_result(
+        self,
+        result: dict,
+        hour: Optional[int],
+        gender: Optional[str],
+        timezone: str
+    ) -> CalculationResult:
+        """내부 결과 → CalculationResult 변환"""
         
         # Pillar 객체로 변환
         year_pillar = self._to_pillar(result["year_pillar"])
@@ -91,10 +140,10 @@ class SajuEngine:
         meta = result["meta"]
         quality = QualityInfo(
             has_birth_time=hour is not None,
-            solar_term_boundary=meta["is_boundary"],
-            boundary_reason=meta["boundary_reason"],
+            solar_term_boundary=meta.get("is_boundary", False),
+            boundary_reason=meta.get("boundary_reason"),
             timezone=timezone,
-            calculation_method=meta["calculation_method"]
+            calculation_method=meta.get("calculation_method", "unknown")
         )
         
         # 대운 정보
@@ -150,6 +199,16 @@ class SajuEngine:
     def get_hour_options(self) -> list:
         """시간대 선택 옵션"""
         return self.engine.get_hour_options()
+    
+    @staticmethod
+    def get_today_context() -> str:
+        """오늘 날짜 컨텍스트 (연도 착각 방지용)"""
+        return SajuManager.get_today_string()
+    
+    @staticmethod
+    def inject_date_context(question: str) -> str:
+        """질문에 오늘 날짜 컨텍스트 주입"""
+        return SajuManager.inject_today_context(question)
 
 
 # 싱글톤 인스턴스

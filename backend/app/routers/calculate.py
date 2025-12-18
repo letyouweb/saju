@@ -1,10 +1,13 @@
 """
-/calculate 엔드포인트 - 천문학 기반 v2
+/calculate 엔드포인트 - KASI API 통합 v3
 
-- ephem 라이브러리: NASA JPL 데이터 기반
-- 태양 황경으로 24절기 정밀 판별
+Source of Truth 우선순위:
+1. KASI API (한국천문연구원) - 실시간 데이터
+2. ephem (NASA JPL) - Fallback
+
+특징:
+- API 실패시 자동 fallback (서비스 무중단)
 - 태양시 보정 ON/OFF 토글 지원
-- fallback 금지 (실패시 에러)
 """
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
@@ -16,7 +19,7 @@ from app.models.schemas import (
     ErrorResponse,
     HourOption
 )
-from app.services.engine_v2 import CalculationError, EPHEM_AVAILABLE
+from app.services.engine_v2 import CalculationError, EPHEM_AVAILABLE, SajuManager
 from app.services.saju_engine import saju_engine
 from app.services.cache import cache_service
 
@@ -32,21 +35,21 @@ router = APIRouter()
         500: {"model": ErrorResponse},
         503: {"model": ErrorResponse}
     },
-    summary="사주 계산 (천문학 기반)",
+    summary="사주 계산 (KASI API + ephem 통합)",
     description="""
 생년월일을 입력받아 사주 원국을 계산합니다.
 
-**천문학 기반 (Source of Truth):**
-- NASA JPL 데이터 기반 ephem 라이브러리 사용
-- 태양 황경(Ecliptic Longitude)으로 24절기 '분' 단위 정밀 판별
-- KASI(한국천문연구원) 데이터와 동일한 천문학적 정답
+**Source of Truth 우선순위:**
+1. **KASI API** (한국천문연구원) - 공식 데이터
+2. **ephem** (NASA JPL) - Fallback
 
 **태양시 보정 (Toggle):**
 - `use_solar_time=true`: 한국 표준시 -30분 보정 (권장)
 - `use_solar_time=false`: 시계 시간 그대로 사용
 
-**fallback 금지:**
-- 계산 실패시 에러 반환 (그럴듯한 결과 노출 금지)
+**고가용성:**
+- KASI API 실패시 자동으로 ephem fallback
+- 서비스 중단 없는 안정적인 응답
     """
 )
 async def calculate_saju(
@@ -54,7 +57,7 @@ async def calculate_saju(
     use_solar_time: bool = Query(True, description="태양시 보정 ON/OFF")
 ):
     """
-    사주 계산 API
+    사주 계산 API (KASI 우선, ephem Fallback)
     """
     
     # ephem 라이브러리 확인
@@ -85,16 +88,10 @@ async def calculate_saju(
     gender = request.gender.value if request.gender else None
     timezone = request.timezone
     
-    # 1. 캐시 확인
-    cache_key = f"{year}-{month}-{day}-{hour}-{minute}-{use_solar_time}"
-    cached = cache_service.get_saju(year, month, day, hour)
-    # 캐시는 solar_time 옵션별로 따로 관리해야 하므로 일단 비활성화
-    # if cached:
-    #     return CalculateResponse(**cached)
-    
-    # 2. 사주 계산 (fallback 금지)
+    # 사주 계산 (KASI 우선 → ephem Fallback)
     try:
-        result = saju_engine.calculate(
+        # 비동기 계산 (KASI API → ephem fallback)
+        result = await saju_engine.calculate_async(
             year=year,
             month=month,
             day=day,
@@ -105,7 +102,7 @@ async def calculate_saju(
             use_solar_time=use_solar_time
         )
         
-        # 3. 응답 구성
+        # 응답 구성
         birth_info = f"{year}년 {month}월 {day}일"
         if hour is not None:
             birth_info += f" {hour}시"
@@ -140,6 +137,8 @@ async def calculate_saju(
             "boundary_warning": boundary_warning,
             "calculation_method": result.quality.calculation_method
         }
+        
+        logger.info(f"Saju calculated: {year}-{month}-{day} | Source: {result.quality.calculation_method}")
         
         return CalculateResponse(**response_data)
         
@@ -190,6 +189,23 @@ async def get_hour_options():
 
 
 @router.get(
+    "/calculate/today",
+    summary="오늘 날짜 (KST)",
+    description="서버의 현재 날짜를 반환합니다. 연도 착각 방지용."
+)
+async def get_today():
+    """오늘 날짜 반환 (KST)"""
+    today = SajuManager.get_today_kst()
+    return {
+        "today": SajuManager.get_today_string(),
+        "year": today.year,
+        "month": today.month,
+        "day": today.day,
+        "timezone": "Asia/Seoul"
+    }
+
+
+@router.get(
     "/calculate/compare",
     summary="태양시 보정 ON/OFF 비교",
     description="동일 날짜에 대해 태양시 보정 ON/OFF 결과를 나란히 비교합니다."
@@ -203,23 +219,20 @@ async def compare_solar_time(
 ):
     """
     태양시 보정 ON/OFF 비교
-    
-    동일한 날짜/시간에 대해 두 모드의 결과를 반환합니다.
-    시주가 달라지는 경계 시간(11시, 13시 등)에서 차이를 확인할 수 있습니다.
     """
     
     if saju_engine is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
     
     # 태양시 보정 ON
-    result_on = saju_engine.calculate(
+    result_on = await saju_engine.calculate_async(
         year=year, month=month, day=day,
         hour=hour, minute=minute,
         use_solar_time=True
     )
     
     # 태양시 보정 OFF
-    result_off = saju_engine.calculate(
+    result_off = await saju_engine.calculate_async(
         year=year, month=month, day=day,
         hour=hour, minute=minute,
         use_solar_time=False
@@ -232,7 +245,7 @@ async def compare_solar_time(
         },
         "solar_time_on": {
             "mode": "태양시 보정 ON (-30분)",
-            "effective_time": f"{(hour * 60 + minute - 30) // 60:02d}:{(hour * 60 + minute - 30) % 60:02d}",
+            "source": result_on.quality.calculation_method,
             "year": result_on.saju.year_pillar.ganji,
             "month": result_on.saju.month_pillar.ganji,
             "day": result_on.saju.day_pillar.ganji,
@@ -240,7 +253,7 @@ async def compare_solar_time(
         },
         "solar_time_off": {
             "mode": "태양시 보정 OFF (시계 시간)",
-            "effective_time": f"{hour:02d}:{minute:02d}",
+            "source": result_off.quality.calculation_method,
             "year": result_off.saju.year_pillar.ganji,
             "month": result_off.saju.month_pillar.ganji,
             "day": result_off.saju.day_pillar.ganji,
