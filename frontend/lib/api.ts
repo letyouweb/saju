@@ -19,27 +19,33 @@ import type {
 
 /**
  * API Base URL 가져오기 (타입 안전)
- * - 환경변수 없으면 런타임 에러 방지
  */
 function getApiBaseUrl(): string {
   const url = process.env.NEXT_PUBLIC_API_URL;
   
+  // 🔍 디버깅: 환경변수 상태 로깅
+  console.log('🔍 [API] NEXT_PUBLIC_API_URL:', url || '(미설정)');
+  console.log('🔍 [API] NODE_ENV:', process.env.NODE_ENV);
+  
   if (!url) {
-    // 개발 환경에서는 localhost 사용
     if (process.env.NODE_ENV === 'development') {
       console.warn('⚠️ NEXT_PUBLIC_API_URL 미설정, localhost:8000 사용');
       return 'http://localhost:8000';
     }
     
-    // 프로덕션에서 미설정이면 에러
+    // 🚨 프로덕션에서 미설정 → 하드코딩 fallback
     console.error('❌ NEXT_PUBLIC_API_URL 환경변수가 설정되지 않았습니다!');
-    throw new Error('API 서버 주소가 설정되지 않았습니다. 관리자에게 문의하세요.');
+    console.warn('⚠️ Fallback: https://api.sajuqueen.com 사용');
+    return 'https://api.sajuqueen.com';
   }
   
   return url;
 }
 
 const API_BASE_URL = getApiBaseUrl();
+
+// 🔍 모듈 로드 시 URL 확인
+console.log('✅ [API] Base URL 확정:', API_BASE_URL);
 
 // ============ 공통 Fetch 함수 ============
 
@@ -58,11 +64,16 @@ async function fetchWithTimeout<T>(
 ): Promise<T> {
   const { method = 'GET', body, timeout = 30000 } = options;
   
+  const fullUrl = `${API_BASE_URL}${endpoint}`;
+  
+  // 🔍 디버깅: 실제 요청 URL 로깅
+  console.log(`🚀 [API] ${method} ${fullUrl}`);
+  
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   
   try {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    const response = await fetch(fullUrl, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -73,8 +84,13 @@ async function fetchWithTimeout<T>(
     
     clearTimeout(timeoutId);
     
+    // 🔍 디버깅: 응답 상태 로깅
+    console.log(`📥 [API] Response: ${response.status} ${response.statusText}`);
+    
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
+      console.error('❌ [API] Error response:', errorData);
+      
       const errorMessage = 
         errorData.message || 
         errorData.detail?.message || 
@@ -83,17 +99,20 @@ async function fetchWithTimeout<T>(
       throw new Error(errorMessage);
     }
     
-    return response.json();
+    const data = await response.json();
+    console.log('✅ [API] Success:', endpoint);
+    return data;
+    
   } catch (error) {
     clearTimeout(timeoutId);
     
     if (error instanceof Error) {
-      // 타임아웃
+      console.error(`❌ [API] Error: ${error.message}`);
+      
       if (error.name === 'AbortError') {
         throw new Error('서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
       }
-      // 네트워크 에러
-      if (error.message.includes('fetch')) {
+      if (error.message.includes('fetch') || error.message.includes('Failed')) {
         throw new Error('서버에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.');
       }
       throw error;
@@ -117,7 +136,6 @@ export async function calculateSaju(
     { method: 'POST', body: data, timeout: 15000 }
   );
   
-  // fallback 결과 경고 (에러는 아님)
   if (result.calculation_method === 'fallback') {
     console.warn('⚠️ Fallback 계산 사용됨');
   }
@@ -134,11 +152,12 @@ export async function interpretSaju(
 ): Promise<InterpretResponse> {
   const result = await fetchWithTimeout<InterpretResponse>(
     '/api/v1/interpret',
-    { method: 'POST', body: data, timeout: 60000 } // GPT 응답 대기 (최대 60초)
+    { method: 'POST', body: data, timeout: 60000 }
   );
   
-  // fallback 응답 체크
+  // fallback 응답 체크 → 에러로 전환
   if (result.model_used === 'fallback') {
+    console.error('❌ GPT API 호출 실패 - fallback 응답');
     throw new Error('AI 해석 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.');
   }
   
@@ -147,7 +166,6 @@ export async function interpretSaju(
 
 /**
  * 시간대 옵션 조회
- * GET /api/v1/calculate/hour-options
  */
 export async function getHourOptions(): Promise<HourOption[]> {
   return fetchWithTimeout<HourOption[]>(
@@ -157,7 +175,7 @@ export async function getHourOptions(): Promise<HourOption[]> {
 }
 
 /**
- * 고민 유형 조회 (로컬 데이터 - 백엔드 호출 안 함)
+ * 고민 유형 조회 (로컬 데이터)
  */
 export function getConcernTypes(): {
   concern_types: Array<{ value: string; label: string; emoji: string }>;
@@ -176,7 +194,6 @@ export function getConcernTypes(): {
 
 /**
  * 헬스체크
- * GET /health
  */
 export async function healthCheck(): Promise<{ status: string }> {
   return fetchWithTimeout<{ status: string }>(
