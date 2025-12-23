@@ -4,7 +4,7 @@
  * 아키텍처:
  * - Vercel (프론트엔드) → Railway (백엔드) 직접 통신
  * - Vercel API Routes 사용 안 함 (보안/효율성)
- * - CORS: Railway에서 sajuqueen.com 허용 필수
+ * - CORS: Railway에서 sajuos.com 허용 필수
  */
 
 import type {
@@ -35,8 +35,8 @@ function getApiBaseUrl(): string {
     
     // 🚨 프로덕션에서 미설정 → 하드코딩 fallback
     console.error('❌ NEXT_PUBLIC_API_URL 환경변수가 설정되지 않았습니다!');
-    console.warn('⚠️ Fallback: https://api.sajuqueen.com 사용');
-    return 'https://api.sajuqueen.com';
+    console.warn('⚠️ Fallback: https://api.sajuos.com 사용');
+    return 'https://api.sajuos.com';
   }
   
   return url;

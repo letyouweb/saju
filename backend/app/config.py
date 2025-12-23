@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     cache_max_size: int = 10000
     
     # CORS - 프로덕션 도메인 포함
-    allowed_origins: str = "http://localhost:3000,https://sajuqueen.com,https://www.sajuqueen.com"
+    allowed_origins: str = "http://localhost:3000,https://sajuos.com,https://www.sajuos.com"
     
     @property
     def allowed_origins_list(self) -> List[str]:

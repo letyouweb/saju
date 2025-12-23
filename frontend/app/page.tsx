@@ -7,7 +7,7 @@ import type { CalculateResponse, InterpretResponse, ConcernType } from '@/types'
 import { calculateSaju, interpretSaju } from '@/lib/api';
 
 export default function Home() {
-  const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주퀸';
+  const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주OS';
   const BRAND_TAGLINE = process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? '당신의 사주를 한 번에 정리해드려요';
 
   const getTodayKst = () =>

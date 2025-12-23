@@ -15,7 +15,7 @@ export default function ResultCard({
   interpretResult,
   onReset,
 }: ResultCardProps) {
-  const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주퀸';
+  const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주OS';
   
   const [activeTab, setActiveTab] = useState<'summary' | 'detail' | 'action'>('summary');
   const [showBoundaryModal, setShowBoundaryModal] = useState(false);

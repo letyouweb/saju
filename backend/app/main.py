@@ -3,7 +3,7 @@
 
 아키텍처:
 - Railway 호스팅
-- Vercel(sajuqueen.com)에서 직접 호출
+- Vercel(sajuos.com)에서 직접 호출
 - CORS 필수 설정
 """
 from fastapi import FastAPI, Request
@@ -72,11 +72,11 @@ app = FastAPI(
 )
 
 # ============ CORS 설정 ============
-# 중요: sajuqueen.com에서 직접 호출 허용
+# 중요: sajuos.com에서 직접 호출 허용
 settings = get_settings()
 
 # CORS 허용 도메인 검증
-REQUIRED_ORIGINS = ["https://sajuqueen.com", "https://www.sajuqueen.com"]
+REQUIRED_ORIGINS = ["https://sajuos.com", "https://www.sajuos.com"]
 for origin in REQUIRED_ORIGINS:
     if origin not in settings.allowed_origins_list:
         logger.warning(f"⚠️ CORS 경고: {origin}이 allowed_origins에 없습니다!")
