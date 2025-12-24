@@ -274,7 +274,11 @@ async def test_gpt_connection():
     
     # 2단계: 실제 API 호출 테스트
     try:
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            max_retries=1
+        )
         
         # 간단한 테스트 요청
         response = await client.chat.completions.create(

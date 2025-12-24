@@ -8,6 +8,7 @@ import json
 import logging
 from typing import Optional, Dict, Any
 from openai import AsyncOpenAI
+import httpx
 
 from app.config import get_settings
 from app.models.schemas import (
@@ -39,7 +40,12 @@ class GptInterpreter:
             key_preview = self.settings.openai_api_key[:8] + "..." if len(self.settings.openai_api_key) > 8 else "???"
             logger.info(f"✅ OpenAI API Key loaded: {key_preview}")
         
-        self.client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        # 타임아웃 설정 추가 (Railway 네트워크 문제 해결)
+        self.client = AsyncOpenAI(
+            api_key=self.settings.openai_api_key,
+            timeout=httpx.Timeout(60.0, connect=10.0),  # 연결 10초, 전체 60초
+            max_retries=2
+        )
         self.model = self.settings.openai_model
         self.max_output_tokens = self.settings.max_output_tokens
     
