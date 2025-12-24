@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"  # 안정적인 최신 모델
     
+    @property
+    def clean_openai_api_key(self) -> str:
+        """API 키에서 공백, 줄바꿈 등 제거"""
+        return self.openai_api_key.strip().replace('\n', '').replace('\r', '').replace('#n', '')
+    
     # KASI (한국천문연구원) API
     kasi_api_key: str = ""
     

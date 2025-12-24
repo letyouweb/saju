@@ -41,8 +41,10 @@ class GptInterpreter:
             logger.info(f"✅ OpenAI API Key loaded: {key_preview}")
         
         # 타임아웃 설정 추가 (Railway 네트워크 문제 해결)
+        # clean_openai_api_key 사용 (줄바꿈, 공백 제거)
+        clean_key = self.settings.clean_openai_api_key
         self.client = AsyncOpenAI(
-            api_key=self.settings.openai_api_key,
+            api_key=clean_key,
             timeout=httpx.Timeout(60.0, connect=10.0),  # 연결 10초, 전체 60초
             max_retries=2
         )

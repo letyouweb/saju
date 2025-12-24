@@ -253,13 +253,16 @@ async def test_gpt_connection():
     
     result = {
         "api_key_set": bool(settings.openai_api_key),
-        "api_key_preview": settings.openai_api_key[:12] + "..." if settings.openai_api_key else "NOT_SET",
+        "api_key_preview": settings.clean_openai_api_key[:12] + "..." if settings.openai_api_key else "NOT_SET",
         "model": settings.openai_model,
     }
     
     if not settings.openai_api_key:
         result["error"] = "OPENAI_API_KEY 환경변수가 설정되지 않았습니다."
         return result
+    
+    # API 키 정리 (줄바꿈, 공백 제거)
+    clean_key = settings.clean_openai_api_key
     
     # 1단계: OpenAI API 서버 연결 테스트
     try:
@@ -275,7 +278,7 @@ async def test_gpt_connection():
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             headers = {
-                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Authorization": f"Bearer {clean_key}",
                 "Content-Type": "application/json"
             }
             payload = {
