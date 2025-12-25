@@ -10,7 +10,7 @@ import re
 
 from app.config import get_settings
 from app.routers import calculate, interpret
-from app.services.openai_key import get_openai_api_key, key_fingerprint
+from app.services.openai_key import get_openai_api_key, key_fingerprint, key_tail
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     
     try:
         key = get_openai_api_key()
-        logger.info("OPENAI key fp=%s tail=%s", key_fingerprint(key), key[-6:])
+        logger.info("OPENAI key fp=%s tail=%s", key_fingerprint(key), key_tail(key))
         logger.info(f"Model: {settings.openai_model}")
     except RuntimeError as e:
         logger.error(f"OPENAI_API_KEY error: {e}")

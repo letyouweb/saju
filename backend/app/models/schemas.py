@@ -146,6 +146,9 @@ class InterpretRequest(BaseModel):
     concern_type: ConcernType = Field(ConcernType.GENERAL, description="고민 유형")
     question: str = Field(..., min_length=5, max_length=500, description="구체적인 고민/질문")
     
+    # 2026 신년운세용: target_year 강제
+    target_year: Optional[int] = Field(2026, description="분석 기준 연도 (기본: 2026)")
+    
     class Config:
         json_schema_extra = {
             "example": {

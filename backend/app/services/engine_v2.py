@@ -11,6 +11,7 @@ Saju Engine v3 - KASI API 통합 (Source of Truth)
 - 오늘 날짜 명시적 주입 (연도 착각 방지)
 """
 import math
+import re
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Tuple
@@ -85,6 +86,17 @@ SOLAR_TERM_NAMES = [
 class CalculationError(Exception):
     """계산 오류"""
     pass
+
+
+# ============ 간지 정규화 (가짜 mismatch 방지) ============
+
+def _norm_ganji(x) -> str:
+    """간지 문자열 정규화 - invisible chars 제거"""
+    s = str(x)
+    s = s.replace("\u200b", "")  # zero-width space
+    s = s.replace("\ufeff", "")  # BOM
+    s = s.replace("\xa0", "")    # NBSP
+    return re.sub(r"\s+", "", s)  # all whitespace
 
 
 class SajuManager:
@@ -377,13 +389,17 @@ class SajuManager:
                 solar_longitude = ephem_data.get("solar_longitude", 0)
                 month_ji_idx = ephem_data.get("month_ji_idx", 0)
                 
-                # 검증: KASI vs ephem 비교
-                if kasi_data["day_ganji"] != ephem_data["day_ganji"]:
+                # 검증: KASI vs ephem 비교 (정규화 후)
+                kasi_day = _norm_ganji(kasi_data["day_ganji"])
+                ephem_day = _norm_ganji(ephem_data["day_ganji"])
+                
+                if kasi_day != ephem_day:
                     logger.warning(
-                        f"KASI vs ephem 불일치! "
-                        f"KASI: {kasi_data['day_ganji']}, ephem: {ephem_data['day_ganji']} "
-                        f"→ KASI 우선 사용"
+                        "⚠️ KASI vs ephem 불일치! KASI: %r, ephem: %r → KASI 우선 사용",
+                        kasi_data['day_ganji'], ephem_data['day_ganji']
                     )
+                else:
+                    logger.info("✅ 간지 일치: %s", kasi_day)
             else:
                 solar_longitude = 0
                 month_ji_idx = 0

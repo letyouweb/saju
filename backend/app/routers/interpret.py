@@ -1,8 +1,10 @@
 """
 /interpret endpoint - Production Ready
+- 2026 신년운세: target_year 강제 컨텍스트
 """
 from fastapi import APIRouter, HTTPException, Request, Query
 from typing import Optional
+import re
 import logging
 
 from app.models.schemas import (
@@ -22,6 +24,34 @@ from app.services.rulecard_selector import select_cards_for_preset
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ============ 2026 컨텍스트 강제 ============
+
+def _extract_year_from_question(text: str) -> Optional[int]:
+    """질문에서 연도 추출"""
+    m = re.search(r"(19|20)\d{2}", text or "")
+    if not m:
+        return None
+    y = int(m.group(0))
+    if 1900 <= y <= 2099:
+        return y
+    return None
+
+
+def inject_year_context(question: str, target_year: int) -> str:
+    """
+    2026 신년운세용: 연도 강제 컨텍스트 주입
+    - '오늘 날짜'를 넣지 않음 (2025/2026 혼동 방지)
+    - 모든 해석을 target_year 기준으로 고정
+    """
+    return f"""[분석 기준 고정]
+- 이 분석은 반드시 {target_year}년 1월~12월 기준으로만 작성합니다.
+- 월별 운세/좋은 시기/조심할 시기는 {target_year}년 달력 흐름으로 제시합니다.
+- 다른 연도(예: 올해/작년/오늘 날짜)를 근거로 섹어 말하지 않습니다.
+
+[사용자 질문]
+{question}""".strip()
 
 
 def _compress_rulecards_for_prompt(selection: dict, max_cards_per_section: int = 6) -> str:
@@ -102,8 +132,13 @@ async def interpret_saju(
         question = f"{question}\n\n[featureTags] {', '.join(ft['tags'][:24])}\n\n{rule_context}"
         logger.info(f"[PremiumMode] Type2 | featureTags={len(ft['tags'])} sections={len(selection.get('sections', []))}")
 
-    question_with_context = SajuManager.inject_today_context(question)
-    logger.info(f"[INTERPRET] Today: {SajuManager.get_today_string()} | Mode: {mode}")
+    # 2026 컨텍스트 강제: target_year 기준
+    target_year = payload.target_year or 2026
+    q_year = _extract_year_from_question(question)
+    final_year = q_year or target_year
+    
+    question_with_context = inject_year_context(question, final_year)
+    logger.info(f"[INTERPRET] TargetYear={final_year} | Mode={mode}")
 
     try:
         result = await gpt_interpreter.interpret(
@@ -168,28 +203,38 @@ async def get_concern_types():
 async def test_gpt_connection():
     """Direct GPT call test - no ping, production ready"""
     from app.config import get_settings
+    from app.services.openai_key import get_openai_api_key, key_fingerprint, key_tail
     from openai import AsyncOpenAI
     import httpx
     
     settings = get_settings()
     
+    try:
+        api_key = get_openai_api_key()
+        key_set = True
+        key_preview = f"fp={key_fingerprint(api_key)} tail={key_tail(api_key)}"
+    except RuntimeError as e:
+        api_key = None
+        key_set = False
+        key_preview = str(e)
+    
     result = {
-        "api_key_set": bool(settings.openai_api_key),
-        "api_key_preview": settings.clean_openai_api_key[:15] + "..." if settings.openai_api_key else "NOT_SET",
+        "api_key_set": key_set,
+        "api_key_preview": key_preview,
         "model": settings.openai_model,
         "max_retries": settings.sajuos_max_retries,
         "timeout": settings.sajuos_timeout,
     }
     
-    if not settings.openai_api_key:
+    if not api_key:
         result["success"] = False
-        result["error"] = "OPENAI_API_KEY not set"
+        result["error"] = "OPENAI_API_KEY not set or invalid"
         return result
     
     # Direct API call only - no ping test
     try:
         client = AsyncOpenAI(
-            api_key=settings.clean_openai_api_key,
+            api_key=api_key,
             timeout=httpx.Timeout(30.0, connect=10.0)
         )
         

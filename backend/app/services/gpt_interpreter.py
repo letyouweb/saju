@@ -16,7 +16,7 @@ import httpx
 from app.config import get_settings
 from app.models.schemas import ConcernType, InterpretResponse
 from app.rules.interpretation_rules import get_full_system_prompt
-from app.services.openai_key import get_openai_api_key, key_fingerprint
+from app.services.openai_key import get_openai_api_key, key_fingerprint, key_tail
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class GptInterpreter:
         """Get or create OpenAI client with fresh settings"""
         settings = get_settings()
         api_key = get_openai_api_key()
-        logger.debug("OpenAI client fp=%s tail=%s", key_fingerprint(api_key), api_key[-6:])
+        logger.debug("OpenAI client fp=%s tail=%s", key_fingerprint(api_key), key_tail(api_key))
         return AsyncOpenAI(
             api_key=api_key,
             timeout=httpx.Timeout(float(settings.sajuos_timeout), connect=15.0),
@@ -85,7 +85,7 @@ class GptInterpreter:
                 error_detail = self._extract_error_detail(e)
                 api_key = get_openai_api_key()
                 logger.error(f"[LLM] AUTH_ERROR (401) | {error_detail}")
-                logger.error("[LLM] API Key fp=%s tail=%s", key_fingerprint(api_key), api_key[-6:])
+                logger.error("[LLM] API Key fp=%s tail=%s", key_fingerprint(api_key), key_tail(api_key))
                 logger.error("[LLM] Check: 1) API key valid 2) Key has permissions 3) No billing issue")
                 raise Exception(f"Authentication failed: {error_detail}")
                 
