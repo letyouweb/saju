@@ -1,6 +1,36 @@
 from __future__ import annotations
 from typing import Dict, List, Set
 
+# ============ 한글 ↔ 한자 변환 ============
+
+HANGUL_STEM = list("갑을병정무기경신임계")
+HANJA_STEM = list("甲乙丙丁戊己庚辛壬癸")
+HANGUL_BRANCH = list("자축인묘진사오미신유술해")
+HANJA_BRANCH = list("子丑寅卯辰巳午未申酉戌亥")
+
+HANGUL_TO_HANJA_STEM = dict(zip(HANGUL_STEM, HANJA_STEM))
+HANGUL_TO_HANJA_BRANCH = dict(zip(HANGUL_BRANCH, HANJA_BRANCH))
+
+def to_hanja_pillar(pillar: str) -> str:
+    """
+    한글 간지를 한자로 변환
+    '무인' → '戊寅', '갑자' → '甲子'
+    이미 한자면 그대로 반환
+    """
+    if not pillar or len(pillar) < 2:
+        return pillar
+    
+    stem = pillar[0]
+    branch = pillar[1]
+    
+    # 한글이면 한자로 변환
+    if stem in HANGUL_TO_HANJA_STEM:
+        stem = HANGUL_TO_HANJA_STEM[stem]
+    if branch in HANGUL_TO_HANJA_BRANCH:
+        branch = HANGUL_TO_HANJA_BRANCH[branch]
+    
+    return stem + branch
+
 STEM_META = {
   "甲":("목","양"),"乙":("목","음"),
   "丙":("화","양"),"丁":("화","음"),
@@ -89,6 +119,11 @@ def season_by_month_branch(mb: str) -> str:
 def build_feature_tags_no_time_from_pillars(
     year_pillar: str, month_pillar: str, day_pillar: str, overlay_year: int = 2026
 ) -> Dict:
+    # 한글 → 한자 변환 (한글 입력 지원)
+    year_pillar = to_hanja_pillar(year_pillar)
+    month_pillar = to_hanja_pillar(month_pillar)
+    day_pillar = to_hanja_pillar(day_pillar)
+    
     yStem, yBranch = year_pillar[0], year_pillar[1]
     mStem, mBranch = month_pillar[0], month_pillar[1]
     dStem, dBranch = day_pillar[0], day_pillar[1]  # day master

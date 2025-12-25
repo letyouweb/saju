@@ -11,6 +11,7 @@ import re
 from app.config import get_settings
 from app.routers import calculate, interpret
 from app.services.openai_key import get_openai_api_key, key_fingerprint, key_tail
+from app.services.rulecards_store import RuleCardStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,12 +35,28 @@ async def lifespan(app: FastAPI):
     logger.info("Saju AI Service starting...")
     settings = get_settings()
     
+    # OpenAI API Key 확인
     try:
         key = get_openai_api_key()
         logger.info("OPENAI key fp=%s tail=%s", key_fingerprint(key), key_tail(key))
         logger.info(f"Model: {settings.openai_model}")
     except RuntimeError as e:
         logger.error(f"OPENAI_API_KEY error: {e}")
+    
+    # RuleCards 로드 (8,500장 사주 데이터)
+    try:
+        import os
+        rulecards_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "data", "sajuos_master_db.jsonl"
+        )
+        rulestore = RuleCardStore(rulecards_path)
+        rulestore.load()
+        app.state.rulestore = rulestore
+        logger.info(f"✅ RuleCards 로드 완료: {len(rulestore.cards)}장, topics={len(rulestore.by_topic)}")
+    except Exception as e:
+        logger.error(f"❌ RuleCards 로드 실패: {e}")
+        app.state.rulestore = None
     
     logger.info(f"CORS origins: {settings.allowed_origins_list}")
     

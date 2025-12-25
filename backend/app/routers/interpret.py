@@ -1,6 +1,7 @@
 """
 /interpret endpoint - Production Ready
 - 2026 신년운세: target_year 강제 컨텍스트
+- RuleCards 8,500장 데이터 자동 활용
 """
 from fastapi import APIRouter, HTTPException, Request, Query
 from typing import Optional
@@ -15,7 +16,7 @@ from app.models.schemas import (
 from app.services.gpt_interpreter import gpt_interpreter
 from app.services.engine_v2 import SajuManager
 
-# RuleCard pipeline (Type2)
+# RuleCard pipeline
 from app.services.feature_tags_no_time import build_feature_tags_no_time_from_pillars
 from app.services.preset_type2 import BUSINESS_OWNER_PRESET_V2
 from app.services.focus_boost import boost_preset_focus
@@ -30,57 +31,115 @@ router = APIRouter()
 def inject_year_context(question: str, target_year: int) -> str:
     """
     2026 신년운세용: 연도 강제 컨텍스트 주입
-    - '오늘 날짜'를 넣지 않음 (2025/2026 혼동 방지)
-    - 모든 해석을 target_year 기준으로 고정
     """
     return f"""[분석 기준 고정]
 - 이 분석은 반드시 {target_year}년 1월~12월 기준으로만 작성합니다.
 - 월별 운세/좋은 시기/조심할 시기는 {target_year}년 달력 흐름으로 제시합니다.
-- 다른 연도(예: 올해/작년/오늘 날짜)를 근거로 섹어 말하지 않습니다.
+- 다른 연도(예: 올해/작년/오늘 날짜)를 근거로 섞어 말하지 않습니다.
 
 [사용자 질문]
 {question}""".strip()
 
 
-def _compress_rulecards_for_prompt(selection: dict, max_cards_per_section: int = 6) -> str:
-    """Compress rulecards for GPT prompt"""
-    lines = ["[RuleCard Context: Business Owner Type2 Premium Mode]"]
+# ============ RuleCards 컨텍스트 생성 ============
+
+def _compress_rulecards_for_prompt(selection: dict, max_cards_per_section: int = 8) -> str:
+    """RuleCards를 GPT 프롬프트용으로 압축"""
+    lines = ["[사주OS RuleCard 컨텍스트 - 8,500장 전문 데이터 기반]"]
+    
+    total_cards = 0
     for sec in selection.get("sections", []):
         title = sec.get("title", sec.get("key", ""))
         meta = sec.get("meta", {})
         avg_overlap = meta.get("avgOverlap", 0)
-        by_stage = meta.get("byStage", {})
-        lines.append(f"\n## {title} (avgOverlap={avg_overlap}, stage={by_stage})")
-
+        
         cards = sec.get("cards", [])[:max_cards_per_section]
+        if not cards:
+            continue
+            
+        lines.append(f"\n## {title} (매칭도={avg_overlap:.1f})")
+
         for c in cards:
+            total_cards += 1
             cid = c.get("id", "")
             topic = c.get("topic", "")
-            tags = ", ".join((c.get("tags") or [])[:8])
-            trig = (c.get("trigger") or "")[:120]
-            mech = (c.get("mechanism") or "")[:160]
-            act = (c.get("action") or "")[:160]
-            lines.append(f"- [ID:{cid}][{topic}] tags={tags}")
-            if trig: lines.append(f"  - Trigger: {trig}")
-            if mech: lines.append(f"  - Mechanism: {mech}")
-            if act:  lines.append(f"  - Action: {act}")
+            tags = ", ".join((c.get("tags") or [])[:6])
+            trig = c.get("trigger", "")
+            if isinstance(trig, dict):
+                trig = trig.get("note", "")
+            trig = str(trig)[:100]
+            mech = (c.get("mechanism") or "")[:150]
+            interp = (c.get("interpretation") or "")[:150]
+            act = (c.get("action") or "")[:150]
+            
+            lines.append(f"- [{cid}] {topic}")
+            lines.append(f"  tags: {tags}")
+            if trig: lines.append(f"  trigger: {trig}")
+            if mech: lines.append(f"  mechanism: {mech}")
+            if interp: lines.append(f"  interpretation: {interp}")
+            if act: lines.append(f"  action: {act}")
 
-    lines.append("\n[Request] Cite RuleCards, provide actionable strategies.")
+    lines.append(f"\n[총 {total_cards}개 RuleCard 참조]")
+    lines.append("[지침] 위 RuleCard를 근거로 구체적이고 실행 가능한 조언을 제공하세요.")
     return "\n".join(lines)
+
+
+def _get_pillar_ganji(pillar_data) -> str:
+    """사주 기둥에서 간지 문자열 추출"""
+    if isinstance(pillar_data, dict):
+        return pillar_data.get("ganji", "")
+    elif isinstance(pillar_data, str):
+        return pillar_data
+    return ""
+
+
+def build_rulecards_context(saju_data: dict, store, target_year: int = 2026) -> tuple:
+    """
+    사주 데이터에서 RuleCards 컨텍스트 생성
+    Returns: (context_string, feature_tags_list, cards_count)
+    """
+    # 사주 기둥 추출
+    year_p = _get_pillar_ganji(saju_data.get("year_pillar", saju_data.get("year", "")))
+    month_p = _get_pillar_ganji(saju_data.get("month_pillar", saju_data.get("month", "")))
+    day_p = _get_pillar_ganji(saju_data.get("day_pillar", saju_data.get("day", "")))
+    
+    if not (year_p and month_p and day_p):
+        logger.warning("[RuleCards] 사주 기둥 데이터 부족")
+        return "", [], 0
+    
+    # Feature Tags 생성
+    ft = build_feature_tags_no_time_from_pillars(year_p, month_p, day_p, overlay_year=target_year)
+    feature_tags = ft.get("tags", [])
+    
+    # Preset 부스트 및 카드 선택
+    boosted = boost_preset_focus(BUSINESS_OWNER_PRESET_V2, feature_tags)
+    selection = select_cards_for_preset(store, boosted, feature_tags)
+    
+    # 컨텍스트 압축
+    context = _compress_rulecards_for_prompt(selection)
+    
+    # 총 카드 수 계산
+    total_cards = sum(len(sec.get("cards", [])) for sec in selection.get("sections", []))
+    
+    return context, feature_tags, total_cards
 
 
 @router.post(
     "/interpret",
     response_model=InterpretResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    summary="Saju Interpretation"
+    summary="Saju Interpretation (RuleCards 자동 적용)"
 )
 async def interpret_saju(
     payload: InterpretRequest,
     raw: Request,
-    mode: str = Query("direct", description="direct | type2_rulecards")
+    mode: str = Query("auto", description="auto | direct (auto=RuleCards 자동 적용)")
 ):
-    """Saju interpretation API"""
+    """
+    사주 해석 API
+    - 8,500장 RuleCards 데이터 자동 활용
+    - 2026년 신년운세 기준
+    """
     saju_data = {}
 
     if payload.saju_result:
@@ -99,34 +158,36 @@ async def interpret_saju(
         }
 
     question = payload.question
-
-    # Premium mode (Type2 RuleCards)
-    if mode == "type2_rulecards":
-        store = getattr(raw.app.state, "rulestore", None)
-        if store is None:
-            raise HTTPException(status_code=500, detail={"error_code": "RULESTORE_NOT_LOADED", "message": "RuleCard store not loaded"})
-
-        year_p = saju_data.get("year_pillar")
-        month_p = saju_data.get("month_pillar")
-        day_p = saju_data.get("day_pillar")
-        if not (year_p and month_p and day_p):
-            raise HTTPException(status_code=400, detail={"error_code": "MISSING_PILLARS", "message": "Pillars required for RuleCard mode"})
-
-        ft = build_feature_tags_no_time_from_pillars(year_p, month_p, day_p, overlay_year=2026)
-        boosted = boost_preset_focus(BUSINESS_OWNER_PRESET_V2, ft["tags"])
-        selection = select_cards_for_preset(store, boosted, ft["tags"])
-        rule_context = _compress_rulecards_for_prompt(selection)
-        
-        question = f"{question}\n\n[featureTags] {', '.join(ft['tags'][:24])}\n\n{rule_context}"
-        logger.info(f"[PremiumMode] Type2 | featureTags={len(ft['tags'])} sections={len(selection.get('sections', []))}")
-
+    
     # 2026 신년운세: target_year 항상 우선 (기본 2026)
-    # - payload.target_year가 명시되면 그걸 사용
-    # - 없으면 2026 고정 (신년운세 상품)
     final_year = payload.target_year if payload.target_year else 2026
     
+    # RuleCards 컨텍스트 생성 (자동)
+    store = getattr(raw.app.state, "rulestore", None)
+    rulecards_context = ""
+    feature_tags = []
+    cards_count = 0
+    
+    if store and mode != "direct":
+        try:
+            rulecards_context, feature_tags, cards_count = build_rulecards_context(
+                saju_data, store, final_year
+            )
+            if rulecards_context:
+                question = f"{question}\n\n[featureTags] {', '.join(feature_tags[:20])}\n\n{rulecards_context}"
+                logger.info(f"[RuleCards] ✅ 적용: {cards_count}장, featureTags={len(feature_tags)}")
+        except Exception as e:
+            logger.warning(f"[RuleCards] 컨텍스트 생성 실패: {e}")
+    else:
+        if not store:
+            logger.warning("[RuleCards] ⚠️ RuleStore 미로드 - direct 모드로 진행")
+        else:
+            logger.info("[RuleCards] direct 모드 - RuleCards 미적용")
+    
+    # 연도 컨텍스트 주입
     question_with_context = inject_year_context(question, final_year)
-    logger.info(f"[INTERPRET] TargetYear={final_year} | Mode={mode}")
+    
+    logger.info(f"[INTERPRET] TargetYear={final_year} | Mode={mode} | RuleCards={cards_count}장")
 
     try:
         result = await gpt_interpreter.interpret(
@@ -146,12 +207,12 @@ async def interpret_saju(
     "/generate-report",
     response_model=InterpretResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    summary="Generate Saju Report (Alias for /interpret)"
+    summary="Generate Saju Report (RuleCards 자동 적용)"
 )
 async def generate_report(
     payload: InterpretRequest,
     raw: Request,
-    mode: str = Query("direct", description="direct | type2_rulecards")
+    mode: str = Query("auto", description="auto | direct")
 ):
     """Generate Saju Report - Alias endpoint for /interpret"""
     return await interpret_saju(payload, raw, mode)
@@ -187,9 +248,28 @@ async def get_concern_types():
     }
 
 
+@router.get("/interpret/rulecards-status", summary="RuleCards Status")
+async def get_rulecards_status(raw: Request):
+    """RuleCards 로드 상태 확인"""
+    store = getattr(raw.app.state, "rulestore", None)
+    if store:
+        return {
+            "loaded": True,
+            "total_cards": len(store.cards),
+            "topics": list(store.by_topic.keys()),
+            "topics_count": len(store.by_topic)
+        }
+    return {
+        "loaded": False,
+        "total_cards": 0,
+        "topics": [],
+        "topics_count": 0
+    }
+
+
 @router.get("/interpret/gpt-test", summary="GPT API Test")
 async def test_gpt_connection():
-    """Direct GPT call test - no ping, production ready"""
+    """Direct GPT call test"""
     from app.config import get_settings
     from app.services.openai_key import get_openai_api_key, key_fingerprint, key_tail
     from openai import AsyncOpenAI
@@ -219,7 +299,6 @@ async def test_gpt_connection():
         result["error"] = "OPENAI_API_KEY not set or invalid"
         return result
     
-    # Direct API call only - no ping test
     try:
         client = AsyncOpenAI(
             api_key=api_key,
@@ -245,7 +324,6 @@ async def test_gpt_connection():
         result["error_type"] = error_type
         result["error"] = error_msg
         
-        # Detailed error guidance
         if "401" in error_msg or "auth" in error_msg.lower():
             result["guidance"] = "Check API key validity and permissions"
         elif "429" in error_msg or "rate" in error_msg.lower():
