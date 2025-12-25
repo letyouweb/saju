@@ -85,12 +85,49 @@ def _compress_rulecards_for_prompt(selection: dict, max_cards_per_section: int =
 
 
 def _get_pillar_ganji(pillar_data) -> str:
-    """사주 기둥에서 간지 문자열 추출"""
+    """
+    사주 기둥에서 간지 문자열 추출
+    - Pillar dict: {"gan": "무", "ji": "인", "ganji": "무인", ...} → '무인'
+    - str: '무인' → '무인'
+    """
     if isinstance(pillar_data, dict):
-        return pillar_data.get("ganji", "")
+        # ganji 필드 우선
+        if pillar_data.get("ganji"):
+            return pillar_data["ganji"]
+        # gan + ji 조합
+        gan = pillar_data.get("gan", "")
+        ji = pillar_data.get("ji", "")
+        if gan and ji:
+            return gan + ji
+        return ""
     elif isinstance(pillar_data, str):
         return pillar_data
     return ""
+
+
+def _extract_pillars_from_saju_data(saju_data: dict) -> tuple:
+    """
+    사주 데이터에서 연/월/일 간지 추출
+    
+    지원 구조:
+    1. saju_result.saju.year_pillar.ganji (프론트엔드 전체 구조)
+    2. saju_data.year_pillar.ganji (saju 서브필드)
+    3. saju_data.year_pillar (문자열)
+    """
+    # Case 1: saju 서브필드가 있는 경우 (saju_result.saju)
+    if "saju" in saju_data and isinstance(saju_data["saju"], dict):
+        saju = saju_data["saju"]
+        year_p = _get_pillar_ganji(saju.get("year_pillar", {}))
+        month_p = _get_pillar_ganji(saju.get("month_pillar", {}))
+        day_p = _get_pillar_ganji(saju.get("day_pillar", {}))
+        return year_p, month_p, day_p
+    
+    # Case 2: 직접 year_pillar 필드 (문자열 또는 dict)
+    year_p = _get_pillar_ganji(saju_data.get("year_pillar", saju_data.get("year", "")))
+    month_p = _get_pillar_ganji(saju_data.get("month_pillar", saju_data.get("month", "")))
+    day_p = _get_pillar_ganji(saju_data.get("day_pillar", saju_data.get("day", "")))
+    
+    return year_p, month_p, day_p
 
 
 def build_rulecards_context(saju_data: dict, store, target_year: int = 2026) -> tuple:
@@ -98,10 +135,10 @@ def build_rulecards_context(saju_data: dict, store, target_year: int = 2026) -> 
     사주 데이터에서 RuleCards 컨텍스트 생성
     Returns: (context_string, feature_tags_list, cards_count)
     """
-    # 사주 기둥 추출
-    year_p = _get_pillar_ganji(saju_data.get("year_pillar", saju_data.get("year", "")))
-    month_p = _get_pillar_ganji(saju_data.get("month_pillar", saju_data.get("month", "")))
-    day_p = _get_pillar_ganji(saju_data.get("day_pillar", saju_data.get("day", "")))
+    # 사주 기둥 추출 (다양한 구조 지원)
+    year_p, month_p, day_p = _extract_pillars_from_saju_data(saju_data)
+    
+    logger.info(f"[RuleCards] 추출된 기둥: 년={year_p}, 월={month_p}, 일={day_p}")
     
     if not (year_p and month_p and day_p):
         logger.warning("[RuleCards] 사주 기둥 데이터 부족")

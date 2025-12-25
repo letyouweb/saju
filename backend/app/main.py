@@ -46,14 +46,30 @@ async def lifespan(app: FastAPI):
     # RuleCards 로드 (8,500장 사주 데이터)
     try:
         import os
-        rulecards_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "data", "sajuos_master_db.jsonl"
-        )
-        rulestore = RuleCardStore(rulecards_path)
-        rulestore.load()
-        app.state.rulestore = rulestore
-        logger.info(f"✅ RuleCards 로드 완료: {len(rulestore.cards)}장, topics={len(rulestore.by_topic)}")
+        
+        # 여러 경로 시도 (Railway/로컬 호환)
+        base_dir = os.path.dirname(os.path.dirname(__file__))  # backend/
+        possible_paths = [
+            os.path.join(base_dir, "data", "sajuos_master_db.jsonl"),
+            os.path.join(os.getcwd(), "data", "sajuos_master_db.jsonl"),
+            "/app/data/sajuos_master_db.jsonl",  # Docker/Railway
+            "data/sajuos_master_db.jsonl",  # 상대 경로
+        ]
+        
+        rulecards_path = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                rulecards_path = p
+                break
+        
+        if not rulecards_path:
+            logger.error(f"❌ RuleCards 파일 없음. 시도한 경로: {possible_paths}")
+            app.state.rulestore = None
+        else:
+            rulestore = RuleCardStore(rulecards_path)
+            rulestore.load()
+            app.state.rulestore = rulestore
+            logger.info(f"✅ RuleCards 로드 완료: {len(rulestore.cards)}장, topics={len(rulestore.by_topic)}, path={rulecards_path}")
     except Exception as e:
         logger.error(f"❌ RuleCards 로드 실패: {e}")
         app.state.rulestore = None
