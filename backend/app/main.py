@@ -10,6 +10,7 @@ import re
 
 from app.config import get_settings
 from app.routers import calculate, interpret
+from app.services.openai_key import get_openai_api_key, key_fingerprint
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,11 +34,12 @@ async def lifespan(app: FastAPI):
     logger.info("Saju AI Service starting...")
     settings = get_settings()
     
-    if settings.openai_api_key:
-        logger.info(f"OPENAI_API_KEY loaded: {settings.openai_api_key[:10]}...")
+    try:
+        key = get_openai_api_key()
+        logger.info("OPENAI key fp=%s tail=%s", key_fingerprint(key), key[-6:])
         logger.info(f"Model: {settings.openai_model}")
-    else:
-        logger.error("OPENAI_API_KEY not set!")
+    except RuntimeError as e:
+        logger.error(f"OPENAI_API_KEY error: {e}")
     
     logger.info(f"CORS origins: {settings.allowed_origins_list}")
     

@@ -16,6 +16,7 @@ import httpx
 from app.config import get_settings
 from app.models.schemas import ConcernType, InterpretResponse
 from app.rules.interpretation_rules import get_full_system_prompt
+from app.services.openai_key import get_openai_api_key, key_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,10 @@ class GptInterpreter:
     def _get_client(self) -> AsyncOpenAI:
         """Get or create OpenAI client with fresh settings"""
         settings = get_settings()
+        api_key = get_openai_api_key()
+        logger.debug("OpenAI client fp=%s tail=%s", key_fingerprint(api_key), api_key[-6:])
         return AsyncOpenAI(
-            api_key=settings.clean_openai_api_key,
+            api_key=api_key,
             timeout=httpx.Timeout(float(settings.sajuos_timeout), connect=15.0),
             max_retries=0
         )
@@ -80,8 +83,9 @@ class GptInterpreter:
             except AuthenticationError as e:
                 # 401 Error - API key issue
                 error_detail = self._extract_error_detail(e)
+                api_key = get_openai_api_key()
                 logger.error(f"[LLM] AUTH_ERROR (401) | {error_detail}")
-                logger.error(f"[LLM] API Key Preview: {settings.clean_openai_api_key[:15]}...")
+                logger.error("[LLM] API Key fp=%s tail=%s", key_fingerprint(api_key), api_key[-6:])
                 logger.error("[LLM] Check: 1) API key valid 2) Key has permissions 3) No billing issue")
                 raise Exception(f"Authentication failed: {error_detail}")
                 
@@ -190,9 +194,11 @@ class GptInterpreter:
     ) -> InterpretResponse:
         settings = get_settings()
         
-        if not settings.openai_api_key:
-            logger.error("[INTERPRET] No API key configured")
-            return self._fallback(name, "NO_API_KEY", "API key not configured")
+        try:
+            api_key = get_openai_api_key()
+        except RuntimeError as e:
+            logger.error(f"[INTERPRET] API key error: {e}")
+            return self._fallback(name, "NO_API_KEY", str(e))
         
         system_prompt = get_full_system_prompt(concern_type)
         user_prompt = self._build_prompt(saju_data, name, gender, concern_type, question)

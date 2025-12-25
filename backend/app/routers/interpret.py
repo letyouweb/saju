@@ -119,6 +119,21 @@ async def interpret_saju(
         raise HTTPException(status_code=500, detail={"error_code": "INTERPRETATION_ERROR", "message": str(e)[:200]})
 
 
+@router.post(
+    "/generate-report",
+    response_model=InterpretResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Generate Saju Report (Alias for /interpret)"
+)
+async def generate_report(
+    payload: InterpretRequest,
+    raw: Request,
+    mode: str = Query("direct", description="direct | type2_rulecards")
+):
+    """Generate Saju Report - Alias endpoint for /interpret"""
+    return await interpret_saju(payload, raw, mode)
+
+
 @router.get("/interpret/today", summary="Today Date")
 async def get_today_context():
     today = SajuManager.get_today_kst()
