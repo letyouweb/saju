@@ -115,11 +115,15 @@ export async function interpretSaju(
   data: InterpretRequest
 ): Promise<InterpretResponse> {
   const result = await fetchApi<InterpretResponse>(
-    '/api/v1/interpret',
-    { method: 'POST', body: data, timeout: 60000 }
+    '/api/v1/generate-report', // 기존 /interpret 에서 변경
+    { 
+      method: 'POST', 
+      body: data, 
+      timeout: 90000 // 리포트 생성이므로 타임아웃 넉넉히 90초
+    }
   );
   
-  // fallback 응답 → 에러 처리
+  // 서버에서 fallback 응답이 올 경우 에러 처리
   if (result.model_used === 'fallback') {
     throw new Error('AI 해석 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.');
   }
