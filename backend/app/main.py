@@ -103,8 +103,8 @@ app.add_middleware(
 
 app.include_router(calculate.router, prefix="/api/v1", tags=["Calculate"])
 app.include_router(interpret.router, prefix="/api/v1", tags=["Interpret"])
-app.include_router(reports.router, prefix="/api", tags=["Premium Reports"])
-app.include_router(reports.router, prefix="/api/v1", tags=["Premium Reports V1"])  # 🔥 Alias for consistency
+app.include_router(reports.router, prefix="/api/v1", tags=["Premium Reports"])  # 🔥 Primary
+app.include_router(reports.router, prefix="/api", tags=["Reports Alias"], include_in_schema=False)  # 🔥 Alias (Swagger 숨김)
 
 
 @app.get("/", tags=["System"])
@@ -118,9 +118,10 @@ async def root():
     }
 
 
+# 🔥 헬스체크 - 외부 의존성 없이 즉시 응답 (Railway 필수)
 @app.get("/health", tags=["System"])
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "ok"}
 
 
 @app.get("/env-check", tags=["System"])

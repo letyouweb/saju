@@ -14,9 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 앱 코드 복사
 COPY . .
 
-# Railway PORT 환경변수 (기본값 8000)
-ENV PORT=8000
+# Railway PORT 환경변수 (Railway 기본값 8080)
+ENV PORT=8080
 EXPOSE $PORT
 
-# 실행
-CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+# 실행 (Railway가 PORT 주입)
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"
