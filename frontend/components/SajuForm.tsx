@@ -7,11 +7,12 @@ import {
   getHourFromJiIndex,
   type ConcernType 
 } from '@/types';
+import BusinessSurvey, { type SurveyData } from './BusinessSurvey';
 
 interface SajuFormProps {
   onSubmit: (data: {
     name: string;
-    email: string;  // 🔥 이메일 추가
+    email: string;
     birthYear: number;
     birthMonth: number;
     birthDay: number;
@@ -20,12 +21,18 @@ interface SajuFormProps {
     gender: 'male' | 'female' | 'other';
     concernType: ConcernType;
     question: string;
+    surveyData?: SurveyData;  // 🔥 7문항 설문 데이터
   }) => void;
 }
 
+type FormStep = 'basic' | 'survey';
+
 export default function SajuForm({ onSubmit }: SajuFormProps) {
+  const [step, setStep] = useState<FormStep>('basic');
+  
+  // 기본 정보
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');  // 🔥 이메일 상태
+  const [email, setEmail] = useState('');
   const [birthYear, setBirthYear] = useState(1990);
   const [birthMonth, setBirthMonth] = useState(1);
   const [birthDay, setBirthDay] = useState(1);
@@ -41,7 +48,7 @@ export default function SajuForm({ onSubmit }: SajuFormProps) {
     return emailRegex.test(email);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleBasicSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
     // 이메일 유효성 검사
@@ -55,6 +62,29 @@ export default function SajuForm({ onSubmit }: SajuFormProps) {
     }
     setEmailError('');
     
+    // 다음 단계: 7문항 설문
+    setStep('survey');
+  };
+
+  const handleSurveyComplete = (surveyData: SurveyData) => {
+    const birthHour = knowHour ? getHourFromJiIndex(hourJiIndex) : null;
+    
+    onSubmit({
+      name: name || '고객님',
+      email,
+      birthYear,
+      birthMonth,
+      birthDay,
+      birthHour,
+      birthMinute: 0,
+      gender,
+      concernType,
+      question: question || surveyData.urgent_question || '올해 사업 운영에서 가장 집중해야 할 영역이 궁금합니다.',
+      surveyData,
+    });
+  };
+
+  const handleSurveySkip = () => {
     const birthHour = knowHour ? getHourFromJiIndex(hourJiIndex) : null;
     
     onSubmit({
@@ -73,8 +103,19 @@ export default function SajuForm({ onSubmit }: SajuFormProps) {
 
   const currentYear = new Date().getFullYear();
 
+  // Step 2: 7문항 설문
+  if (step === 'survey') {
+    return (
+      <BusinessSurvey 
+        onComplete={handleSurveyComplete}
+        onSkip={handleSurveySkip}
+      />
+    );
+  }
+
+  // Step 1: 기본 정보 입력
   return (
-    <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-lg p-6 md:p-8 animate-fade-in-up">
+    <form onSubmit={handleBasicSubmit} className="bg-white rounded-2xl shadow-lg p-6 md:p-8 animate-fade-in-up">
       <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
         <span>📝</span> 프리미엄 비즈니스 보고서 신청
       </h2>
@@ -285,7 +326,7 @@ export default function SajuForm({ onSubmit }: SajuFormProps) {
         type="submit"
         className="w-full py-4 bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white font-bold text-lg rounded-xl shadow-lg hover:shadow-xl transition transform hover:-translate-y-0.5"
       >
-        💎 프리미엄 보고서 생성하기
+        다음: 맞춤 설문 (60초) →
       </button>
       
       {/* 가격 안내 */}

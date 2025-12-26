@@ -169,6 +169,18 @@ export interface ReportStartRequest {
   target_year?: number;
   question?: string;
   concern_type?: string;
+  survey_data?: {  // 🔥 7문항 설문 데이터
+    industry?: string;
+    business_stage?: string;
+    monthly_revenue?: string;
+    margin_percent?: number;
+    cash_reserve?: string;
+    primary_bottleneck?: string;
+    goal_detail?: string;
+    time_availability?: string;
+    risk_tolerance?: string;
+    urgent_question?: string;
+  };
 }
 
 export interface ReportStartResponse {

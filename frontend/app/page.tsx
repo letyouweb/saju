@@ -5,6 +5,7 @@ import SajuForm from '@/components/SajuForm';
 import ResultCard from '@/components/ResultCard';
 import ProgressStepper from '@/components/ProgressStepper';
 import type { CalculateResponse, InterpretResponse, ConcernType } from '@/types';
+import type { SurveyData } from '@/components/BusinessSurvey';
 import { calculateSaju, startReportGeneration } from '@/lib/api';
 
 type Step = 'input' | 'calculating' | 'generating' | 'result';
@@ -24,7 +25,7 @@ export default function Home() {
 
   const handleSubmit = async (formData: {
     name: string;
-    email: string;  // 🔥 이메일 필드 추가
+    email: string;
     birthYear: number;
     birthMonth: number;
     birthDay: number;
@@ -33,6 +34,7 @@ export default function Home() {
     gender: 'male' | 'female' | 'other';
     concernType: ConcernType;
     question: string;
+    surveyData?: SurveyData;  // 🔥 7문항 설문 데이터
   }) => {
     setStep('calculating');
     setError(null);
@@ -61,14 +63,18 @@ export default function Home() {
         question: questionWithDate,
         concern_type: formData.concernType,
         target_year: 2025,
+        survey_data: formData.surveyData,  // 🔥 7문항 설문 데이터 전달
       });
 
       if (!response.success) {
         throw new Error(response.message || '리포트 생성 시작 실패');
       }
 
-      // Report ID 저장 → ProgressStepper에 전달
+      // Report ID 저장 → localStorage에도 저장 (재접속 복구용)
       setReportId(response.report_id);
+      localStorage.setItem('sajuos_report_id', response.report_id);
+      localStorage.setItem('sajuos_report_email', formData.email);
+      
       setStep('generating');
 
     } catch (err) {
@@ -81,13 +87,13 @@ export default function Home() {
   const handleReportComplete = (result: any) => {
     // 폴링 완료 시 결과 설정
     setInterpretResult(result);
+    localStorage.removeItem('sajuos_report_id');
     setStep('result');
   };
 
   const handleReportError = (errorMsg: string) => {
     setError(errorMsg);
     // 에러 시에도 재시도 가능하도록 step은 유지
-    // setStep('input');
   };
 
   const handleReset = () => {
@@ -96,6 +102,7 @@ export default function Home() {
     setCalculateResult(null);
     setInterpretResult(null);
     setError(null);
+    localStorage.removeItem('sajuos_report_id');
   };
 
   return (
