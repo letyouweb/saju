@@ -42,6 +42,9 @@ class ReportStartRequest(BaseModel):
     target_year: int = 2026
     question: str = ""
     concern_type: str = "career"
+    
+    # 🔥 v7: 7문항 설문 데이터
+    survey_data: Optional[Dict[str, Any]] = None
 
 
 class ReportStartResponse(BaseModel):
@@ -89,6 +92,10 @@ async def start_report_generation(
         "question": payload.question,
         "concern_type": payload.concern_type,
     }
+    
+    # 🔥 v7: 설문 데이터 추가
+    if payload.survey_data:
+        input_data["survey_data"] = payload.survey_data
     
     if payload.saju_result:
         input_data["saju_result"] = payload.saju_result

@@ -1,11 +1,11 @@
 """
-SajuOS Premium Report Builder v6
+SajuOS Premium Report Builder v7
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔥 v6 핵심 개선:
-1) 한국어 고정 + 비즈니스 가드레일 (영어 튐/취업 템플릿 차단)
-2) RuleCard 최소 8개 강제 + 유니크 합산
-3) 90-Day Sprint 비즈니스 전용 템플릿 (리드→전환→LTV→자동화)
-4) 검증 실패 시 자동 재생성 (최대 2회)
+🔥 v7 핵심 개선:
+1) 품질 게이트 3중 필터 (금지어/구체성/중복)
+2) 7문항 설문 기반 개인화 컨텍스트 주입
+3) 룰카드 스코어링 엔진 (사업가형 50태그 기반)
+4) 검증 실패 시 자동 재생성 + 품질 피드백
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 import asyncio
@@ -28,6 +28,22 @@ from app.services.terminology_mapper import (
     get_business_prompt_rules,
 )
 from app.services.job_store import job_store, JobStore
+
+# 🔥 v7: 품질 게이트 + 설문 + 스코어링 모듈
+from app.services.quality_gate import (
+    quality_gate, 
+    QualityReport, 
+    get_quality_improvement_prompt,
+    clean_banned_phrases
+)
+from app.services.survey_intake import (
+    SurveyResponse, 
+    survey_to_prompt_context
+)
+from app.services.rulecard_scorer import (
+    rulecard_scorer, 
+    SectionCards
+)
 
 logger = logging.getLogger(__name__)
 
@@ -548,12 +564,15 @@ def allocate_rulecards_to_section(
 # 6. 프롬프트 생성 (비즈니스 가드레일 강화)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def get_section_system_prompt(section_id: str, target_year: int) -> str:
+def get_section_system_prompt(section_id: str, target_year: int, survey_context: str = "") -> str:
     spec = PREMIUM_SECTIONS.get(section_id)
     if not spec:
         spec = PREMIUM_SECTIONS["exec"]
     
     terminology_rules = get_business_prompt_rules()
+    
+    # 🔥 v7: 품질 게이트 규칙 추가
+    quality_rules = get_quality_improvement_prompt()
     
     # 🔥 가드레일: 한국어 + 비즈니스 전용
     guardrail = """
@@ -571,6 +590,10 @@ def get_section_system_prompt(section_id: str, target_year: int) -> str:
 ## 분석 기준년도: {target_year}년
 
 {guardrail}
+
+{quality_rules}
+
+{survey_context if survey_context else ""}
 
 ## 🎯 90-Day Sprint Plan 필수 구조 (리드→전환→LTV→자동화)
 
@@ -605,6 +628,10 @@ JSON 스키마에 맞춰 정확히 응답하세요."""
 ## 분석 기준년도: {target_year}년
 
 {guardrail}
+
+{quality_rules}
+
+{survey_context if survey_context else ""}
 
 ## 핵심 원칙
 1. 사주 풀이가 아닌 '경영 전략 보고서' 스타일로 작성
@@ -754,9 +781,10 @@ class PremiumReportBuilder:
         target_year: int,
         user_question: str,
         max_regeneration: int = 2,
-        job_id: Optional[str] = None
+        job_id: Optional[str] = None,
+        survey_context: str = ""  # 🔥 v7: 설문 컨텍스트
     ) -> Dict[str, Any]:
-        """섹션 생성 + 가드레일 검증 + 자동 재생성"""
+        """섹션 생성 + 가드레일 검증 + 품질 게이트 + 자동 재생성"""
         
         async with self._semaphore:
             start_time = time.time()
@@ -766,7 +794,7 @@ class PremiumReportBuilder:
             if job_id:
                 await job_store.section_start(job_id, section_id)
             
-            system_prompt = get_section_system_prompt(section_id, target_year)
+            system_prompt = get_section_system_prompt(section_id, target_year, survey_context)
             user_prompt = get_section_user_prompt(section_id, saju_data, allocation, target_year, user_question)
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -794,6 +822,18 @@ class PremiumReportBuilder:
                 body_text = content.get("body_markdown", "")
                 is_valid, errors = validate_language_and_topic(body_text, section_id)
                 
+                # 🔥 v7: 품질 게이트 검증 (금지어/구체성/중복)
+                quality_report = quality_gate.check_section(
+                    section_id=section_id,
+                    content=body_text,
+                    existing_contents=[]  # TODO: 이전 섹션 내용 전달
+                )
+                
+                if not quality_report.passed:
+                    is_valid = False
+                    errors.extend([f"QUALITY_GATE:{issue.type}" for issue in quality_report.issues[:3]])
+                    logger.warning(f"[Section:{section_id}] 품질 게이트 점수: {quality_report.score}/100")
+                
                 if is_valid:
                     logger.info(f"[Section:{section_id}] ✅ 가드레일 통과")
                     break
@@ -820,9 +860,10 @@ class PremiumReportBuilder:
         user_question: str = "",
         name: str = "고객",
         mode: str = "premium",
-        job_id: Optional[str] = None
+        job_id: Optional[str] = None,
+        survey_data: Optional[Dict[str, Any]] = None  # 🔥 v7: 7문항 설문 데이터
     ) -> Dict[str, Any]:
-        """7개 섹션 순차 생성 (Progress 지원)"""
+        """7개 섹션 순차 생성 (Progress 지원 + 품질 게이트)"""
         settings = get_settings()
         start_time = time.time()
         
@@ -831,6 +872,16 @@ class PremiumReportBuilder:
         
         if not feature_tags:
             feature_tags = []
+        
+        # 🔥 v7: 설문 데이터 → 프롬프트 컨텍스트 변환
+        survey_context = ""
+        if survey_data:
+            try:
+                survey = SurveyResponse.from_dict(survey_data)
+                survey_context = survey_to_prompt_context(survey)
+                logger.info(f"[PremiumReport] 설문 컨텍스트 생성: {len(survey_context)}자")
+            except Exception as e:
+                logger.warning(f"[PremiumReport] 설문 데이터 변환 실패: {e}")
         
         # 🔥 Progress: Job 시작
         if job_id:
@@ -861,7 +912,7 @@ class PremiumReportBuilder:
             allocations[sid] = alloc
             used_card_ids.update(alloc.allocated_card_ids)
         
-        # 섹션 생성 (가드레일 포함) - 🔥 순차 처리로 변경 (Progress 지원)
+        # 섹션 생성 (가드레일 + 품질 게이트 포함) - 🔥 순차 처리로 변경 (Progress 지원)
         results = []
         for sid in section_ids:
             try:
@@ -872,7 +923,8 @@ class PremiumReportBuilder:
                     target_year=target_year,
                     user_question=user_question,
                     max_regeneration=2,
-                    job_id=job_id
+                    job_id=job_id,
+                    survey_context=survey_context  # 🔥 v7: 설문 컨텍스트 전달
                 )
                 results.append(result)
                 
@@ -1003,7 +1055,8 @@ class PremiumReportBuilder:
         rulecards: List[Dict[str, Any]],
         feature_tags: List[str] = None,
         target_year: int = 2026,
-        user_question: str = ""
+        user_question: str = "",
+        survey_data: Optional[Dict[str, Any]] = None  # 🔥 v7: 설문 데이터
     ) -> Dict[str, Any]:
         """단일 섹션 재생성"""
         if section_id not in PREMIUM_SECTIONS:
@@ -1014,6 +1067,15 @@ class PremiumReportBuilder:
         
         if not feature_tags:
             feature_tags = []
+        
+        # 🔥 v7: 설문 데이터 → 프롬프트 컨텍스트 변환
+        survey_context = ""
+        if survey_data:
+            try:
+                survey = SurveyResponse.from_dict(survey_data)
+                survey_context = survey_to_prompt_context(survey)
+            except Exception as e:
+                logger.warning(f"[SingleSection] 설문 데이터 변환 실패: {e}")
         
         global_selection = select_global_top100(rulecards, feature_tags, top_limit=100)
         spec = PREMIUM_SECTIONS[section_id]
@@ -1026,7 +1088,8 @@ class PremiumReportBuilder:
                 allocation=allocation,
                 target_year=target_year,
                 user_question=user_question,
-                max_regeneration=2
+                max_regeneration=2,
+                survey_context=survey_context  # 🔥 v7: 설문 컨텍스트 전달
             )
             
             content = result["content"]

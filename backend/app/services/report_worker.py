@@ -103,6 +103,9 @@ class ReportWorker:
         # 미완료 섹션 조회 (재시도 지원)
         pending_sections = await supabase_store.get_pending_sections(report_id)
         
+        # 🔥 v7: 설문 데이터 추출
+        survey_data = input_data.get("survey_data", None)
+        
         if not pending_sections:
             # 모든 섹션이 이미 완료됨
             logger.info(f"[Worker] 모든 섹션 완료 - 결과 조합 단계")
@@ -119,7 +122,8 @@ class ReportWorker:
                         rulecards=rulecards,
                         feature_tags=feature_tags,
                         target_year=target_year,
-                        user_question=input_data.get("question", "")
+                        user_question=input_data.get("question", ""),
+                        survey_data=survey_data  # 🔥 v7: 설문 데이터 전달
                     )
                 except Exception as e:
                     # 섹션 실패 - 계속 진행 (다른 섹션은 생성)
@@ -228,7 +232,8 @@ class ReportWorker:
         rulecards: List[Dict[str, Any]],
         feature_tags: List[str],
         target_year: int,
-        user_question: str
+        user_question: str,
+        survey_data: Optional[Dict[str, Any]] = None  # 🔥 v7: 설문 데이터
     ) -> Dict[str, Any]:
         """단일 섹션 생성"""
         
@@ -245,7 +250,8 @@ class ReportWorker:
                 rulecards=rulecards,
                 feature_tags=feature_tags,
                 target_year=target_year,
-                user_question=user_question
+                user_question=user_question,
+                survey_data=survey_data  # 🔥 v7: 설문 데이터 전달
             )
             
             elapsed_ms = int((time.time() - section_start) * 1000)
