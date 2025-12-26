@@ -1,7 +1,7 @@
 """
-/interpret endpoint - Premium Report Builder
-- 7개 섹션 병렬 생성 (Chaining)
-- 2026 신년운세 기준
+/interpret endpoint - Premium Business Report Engine
+- 99,000원 프리미엄 모드: 7섹션 병렬 생성 + 용어 치환 + 분량 강제
+- 기본 모드: 레거시 단일 호출
 - RuleCards 8,500장 데이터 자동 활용
 """
 from fastapi import APIRouter, HTTPException, Request, Query
@@ -16,7 +16,7 @@ from app.models.schemas import (
     ConcernType
 )
 from app.services.gpt_interpreter import gpt_interpreter
-from app.services.report_builder import report_builder, SECTION_SPECS
+from app.services.report_builder import premium_report_builder, PREMIUM_SECTIONS
 from app.services.engine_v2 import SajuManager
 
 # RuleCard pipeline
@@ -27,19 +27,6 @@ from app.services.rulecard_selector import select_cards_for_preset
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-# ============ 2026 컨텍스트 강제 ============
-
-def inject_year_context(question: str, target_year: int) -> str:
-    """2026 신년운세용: 연도 강제 컨텍스트 주입"""
-    return f"""[분석 기준 고정]
-- 이 분석은 반드시 {target_year}년 1월~12월 기준으로만 작성합니다.
-- 월별 운세/좋은 시기/조심할 시기는 {target_year}년 달력 흐름으로 제시합니다.
-- 다른 연도(예: 올해/작년/오늘 날짜)를 근거로 섞어 말하지 않습니다.
-
-[사용자 질문]
-{question}""".strip()
 
 
 # ============ Helper Functions ============
@@ -102,44 +89,40 @@ def _get_all_rulecards(saju_data: dict, store, target_year: int) -> list:
     return all_cards
 
 
+def inject_year_context(question: str, target_year: int) -> str:
+    """연도 강제 컨텍스트 주입"""
+    return f"""[분석 기준 고정]
+- 이 분석은 반드시 {target_year}년 1월~12월 기준으로만 작성합니다.
+- 월별 운세/좋은 시기/조심할 시기는 {target_year}년 달력 흐름으로 제시합니다.
+
+[사용자 질문]
+{question}""".strip()
+
+
 def _compress_rulecards_for_prompt(selection: dict, max_cards_per_section: int = 8) -> str:
     """RuleCards를 GPT 프롬프트용으로 압축"""
-    lines = ["[사주OS RuleCard 컨텍스트 - 8,500장 전문 데이터 기반]"]
+    lines = ["[사주OS RuleCard 컨텍스트]"]
     
     total_cards = 0
     for sec in selection.get("sections", []):
         title = sec.get("title", sec.get("key", ""))
-        meta = sec.get("meta", {})
-        avg_overlap = meta.get("avgOverlap", 0)
-        
         cards = sec.get("cards", [])[:max_cards_per_section]
         if not cards:
             continue
             
-        lines.append(f"\n## {title} (매칭도={avg_overlap:.1f})")
-
+        lines.append(f"\n## {title}")
         for c in cards:
             total_cards += 1
             cid = c.get("id", "")
             topic = c.get("topic", "")
-            tags = ", ".join((c.get("tags") or [])[:6])
-            trig = c.get("trigger", "")
-            if isinstance(trig, dict):
-                trig = trig.get("note", "")
-            trig = str(trig)[:100]
-            mech = (c.get("mechanism") or "")[:150]
-            interp = (c.get("interpretation") or "")[:150]
-            act = (c.get("action") or "")[:150]
+            mech = (c.get("mechanism") or "")[:100]
+            act = (c.get("action") or "")[:100]
             
             lines.append(f"- [{cid}] {topic}")
-            lines.append(f"  tags: {tags}")
-            if trig: lines.append(f"  trigger: {trig}")
             if mech: lines.append(f"  mechanism: {mech}")
-            if interp: lines.append(f"  interpretation: {interp}")
             if act: lines.append(f"  action: {act}")
 
     lines.append(f"\n[총 {total_cards}개 RuleCard 참조]")
-    lines.append("[지침] 위 RuleCard를 근거로 구체적이고 실행 가능한 조언을 제공하세요.")
     return "\n".join(lines)
 
 
@@ -147,10 +130,7 @@ def build_rulecards_context(saju_data: dict, store, target_year: int = 2026) -> 
     """사주 데이터에서 RuleCards 컨텍스트 생성"""
     year_p, month_p, day_p = _extract_pillars_from_saju_data(saju_data)
     
-    logger.info(f"[RuleCards] 추출된 기둥: 년={year_p}, 월={month_p}, 일={day_p}")
-    
     if not (year_p and month_p and day_p):
-        logger.warning("[RuleCards] 사주 기둥 데이터 부족")
         return "", [], 0
     
     ft = build_feature_tags_no_time_from_pillars(year_p, month_p, day_p, overlay_year=target_year)
@@ -171,26 +151,27 @@ def build_rulecards_context(saju_data: dict, store, target_year: int = 2026) -> 
     "/interpret",
     response_model=InterpretResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    summary="Saju Interpretation (Legacy, RuleCards 자동 적용)"
+    summary="Saju Interpretation (Legacy 단일 호출)"
 )
 async def interpret_saju(
     payload: InterpretRequest,
     raw: Request,
-    mode: str = Query("auto", description="auto | direct | sectioned")
+    mode: str = Query("auto", description="auto | direct | premium")
 ):
     """
     사주 해석 API (Legacy 단일 호출)
-    - 8,500장 RuleCards 데이터 자동 활용
-    - 2026년 신년운세 기준
+    - premium 모드는 /generate-report 사용 권장
     """
+    # premium 모드면 리다이렉트
+    if mode == "premium":
+        return await generate_premium_report(payload, raw, mode)
+    
     saju_data = {}
-
     if payload.saju_result:
         saju_data = payload.saju_result.model_dump()
     else:
         if not all([payload.year_pillar, payload.month_pillar, payload.day_pillar]):
             raise HTTPException(status_code=400, detail={"error_code": "MISSING_SAJU_DATA", "message": "Saju data required"})
-
         saju_data = {
             "year_pillar": payload.year_pillar,
             "month_pillar": payload.month_pillar,
@@ -205,22 +186,18 @@ async def interpret_saju(
     
     store = getattr(raw.app.state, "rulestore", None)
     rulecards_context = ""
-    feature_tags = []
     cards_count = 0
     
     if store and mode != "direct":
         try:
-            rulecards_context, feature_tags, cards_count = build_rulecards_context(
-                saju_data, store, final_year
-            )
+            rulecards_context, feature_tags, cards_count = build_rulecards_context(saju_data, store, final_year)
             if rulecards_context:
-                question = f"{question}\n\n[featureTags] {', '.join(feature_tags[:20])}\n\n{rulecards_context}"
-                logger.info(f"[RuleCards] ✅ 적용: {cards_count}장, featureTags={len(feature_tags)}")
+                question = f"{question}\n\n{rulecards_context}"
         except Exception as e:
             logger.warning(f"[RuleCards] 컨텍스트 생성 실패: {e}")
     
     question_with_context = inject_year_context(question, final_year)
-    logger.info(f"[INTERPRET] TargetYear={final_year} | Mode={mode} | RuleCards={cards_count}장")
+    logger.info(f"[INTERPRET] Year={final_year} | Mode={mode} | Cards={cards_count}")
 
     try:
         result = await gpt_interpreter.interpret(
@@ -239,19 +216,21 @@ async def interpret_saju(
 @router.post(
     "/generate-report",
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    summary="프리미엄 30페이지 보고서 생성 (7섹션 병렬)"
+    summary="99,000원 프리미엄 30페이지 비즈니스 컨설팅 보고서"
 )
-async def generate_report(
+async def generate_premium_report(
     payload: InterpretRequest,
     raw: Request,
-    mode: str = Query("sectioned", description="sectioned | legacy")
+    mode: str = Query("premium", description="premium | legacy")
 ):
     """
-    프리미엄 비즈니스 컨설팅 보고서 생성
+    🎯 99,000원 프리미엄 비즈니스 컨설팅 보고서
     
-    - 7개 섹션 병렬 생성 (Chaining)
-    - 섹션별 룰카드 분배
-    - 30페이지급 상세 분석
+    **특징:**
+    - 7개 섹션 병렬 생성 (약 2~3분 소요)
+    - 명리학 용어 → 비즈니스 용어 100% 치환
+    - 섹션당 최소 분량 강제 + 자동 확장
+    - 맥킨지/BCG급 컨설팅 보고서 스타일
     
     **섹션 구성:**
     1. Executive Summary (2p)
@@ -259,10 +238,19 @@ async def generate_report(
     3. Business Strategy (5p)
     4. Team & Partner Risk (4p)
     5. Health & Performance (3p)
-    6. 12-Month Calendar (6p)
+    6. 12-Month Tactical Calendar (6p)
     7. 90-Day Sprint Plan (5p)
+    
+    **필수 포함 요소 (각 섹션):**
+    - 현상 진단
+    - 핵심 가설 3개
+    - 전략 옵션 3개 (장단점)
+    - 추천 전략 + 주간 실행 계획
+    - KPI/측정법
+    - 리스크/방어
+    - 근거 RuleCard ID 목록
     """
-    # Legacy 모드면 기존 로직 사용
+    # Legacy 모드면 기존 로직
     if mode == "legacy":
         return await interpret_saju(payload, raw, "auto")
     
@@ -285,6 +273,7 @@ async def generate_report(
             "day_master_element": ""
         }
     
+    # target_year 기본값 2026 강제
     final_year = payload.target_year if payload.target_year else 2026
     
     # RuleCards 로드
@@ -295,34 +284,45 @@ async def generate_report(
         try:
             rulecards = _get_all_rulecards(saju_data, store, final_year)
         except Exception as e:
-            logger.warning(f"[ReportBuilder] RuleCards 로드 실패: {e}")
+            logger.warning(f"[PremiumReport] RuleCards 로드 실패: {e}")
     else:
-        logger.warning("[ReportBuilder] ⚠️ RuleStore 미로드")
+        logger.warning("[PremiumReport] ⚠️ RuleStore 미로드")
     
-    logger.info(f"[GENERATE-REPORT] Year={final_year} | RuleCards={len(rulecards)} | Mode={mode}")
+    logger.info(f"[PREMIUM-REPORT] Year={final_year} | RuleCards={len(rulecards)} | Mode={mode}")
     
     try:
-        # 7섹션 병렬 생성
-        report = await report_builder.build_report(
+        # 프리미엄 7섹션 병렬 생성
+        report = await premium_report_builder.build_premium_report(
             saju_data=saju_data,
             rulecards=rulecards,
             target_year=final_year,
             user_question=payload.question,
-            name=payload.name
+            name=payload.name,
+            mode="premium_business_30p"
         )
         
-        # 전체 JSON 반환 (프론트에서 렌더링 가능한 구조)
         return JSONResponse(content=report)
         
     except Exception as e:
-        logger.error(f"[GENERATE-REPORT] Error: {type(e).__name__}: {str(e)[:200]}")
-        raise HTTPException(
+        logger.error(f"[PREMIUM-REPORT] Error: {type(e).__name__}: {str(e)[:200]}")
+        
+        # 부분 실패 시에도 응답 반환
+        return JSONResponse(
             status_code=500,
-            detail={"error_code": "REPORT_GENERATION_ERROR", "message": str(e)[:200]}
+            content={
+                "error": True,
+                "error_code": "REPORT_GENERATION_ERROR",
+                "message": str(e)[:200],
+                "target_year": final_year,
+                "sections": [],
+                "meta": {"mode": "premium_business_30p", "error": True}
+            }
         )
 
 
-@router.get("/interpret/today", summary="Today Date")
+# ============ Utility Endpoints ============
+
+@router.get("/interpret/today", summary="Today Date (KST)")
 async def get_today_context():
     today = SajuManager.get_today_kst()
     return {
@@ -360,38 +360,36 @@ async def get_rulecards_status(raw: Request):
         return {
             "loaded": True,
             "total_cards": len(store.cards),
-            "topics": list(store.by_topic.keys()),
+            "topics": list(store.by_topic.keys())[:20],
             "topics_count": len(store.by_topic)
         }
-    return {
-        "loaded": False,
-        "total_cards": 0,
-        "topics": [],
-        "topics_count": 0
-    }
+    return {"loaded": False, "total_cards": 0, "topics": [], "topics_count": 0}
 
 
-@router.get("/interpret/report-sections", summary="Report Sections Info")
-async def get_report_sections():
+@router.get("/interpret/premium-sections", summary="Premium Report Sections Info")
+async def get_premium_sections():
     """프리미엄 리포트 섹션 정보"""
     return {
+        "mode": "premium_business_30p",
+        "price": "99,000원",
+        "total_pages": sum(s.pages for s in PREMIUM_SECTIONS.values()),
         "sections": [
             {
-                "id": spec["id"],
-                "title": spec["title"],
-                "pages": spec["pages"],
-                "rulecard_quota": spec["rulecard_quota"],
-                "topics": spec["topics"]
+                "id": spec.id,
+                "title": spec.title,
+                "pages": spec.pages,
+                "min_chars": spec.min_chars,
+                "rulecard_quota": spec.rulecard_quota,
+                "required_elements": spec.required_elements
             }
-            for spec in SECTION_SPECS.values()
-        ],
-        "total_pages": sum(s["pages"] for s in SECTION_SPECS.values())
+            for spec in PREMIUM_SECTIONS.values()
+        ]
     }
 
 
-@router.get("/interpret/gpt-test", summary="GPT API Test")
+@router.get("/interpret/gpt-test", summary="GPT API Connection Test")
 async def test_gpt_connection():
-    """Direct GPT call test"""
+    """GPT API 연결 테스트"""
     from app.config import get_settings
     from app.services.openai_key import get_openai_api_key, key_fingerprint, key_tail
     from openai import AsyncOpenAI
@@ -404,57 +402,21 @@ async def test_gpt_connection():
         key_set = True
         key_preview = f"fp={key_fingerprint(api_key)} tail={key_tail(api_key)}"
     except RuntimeError as e:
-        api_key = None
-        key_set = False
-        key_preview = str(e)
-    
-    result = {
-        "api_key_set": key_set,
-        "api_key_preview": key_preview,
-        "model": settings.openai_model,
-        "max_retries": settings.sajuos_max_retries,
-        "timeout": settings.sajuos_timeout,
-    }
-    
-    if not api_key:
-        result["success"] = False
-        result["error"] = "OPENAI_API_KEY not set or invalid"
-        return result
+        return {"success": False, "error": str(e)}
     
     try:
-        client = AsyncOpenAI(
-            api_key=api_key,
-            timeout=httpx.Timeout(30.0, connect=10.0)
-        )
-        
-        chat_resp = await client.chat.completions.create(
+        client = AsyncOpenAI(api_key=api_key, timeout=httpx.Timeout(30.0, connect=10.0))
+        resp = await client.chat.completions.create(
             model=settings.openai_model,
             messages=[{"role": "user", "content": "Say hello"}],
             max_tokens=20
         )
-        
-        result["success"] = True
-        result["response"] = chat_resp.choices[0].message.content
-        result["model_used"] = chat_resp.model
-        result["status"] = "READY_FOR_PRODUCTION"
-        
+        return {
+            "success": True,
+            "api_key_preview": key_preview,
+            "model": settings.openai_model,
+            "response": resp.choices[0].message.content,
+            "status": "READY_FOR_PRODUCTION"
+        }
     except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)[:300]
-        
-        result["success"] = False
-        result["error_type"] = error_type
-        result["error"] = error_msg
-        
-        if "401" in error_msg or "auth" in error_msg.lower():
-            result["guidance"] = "Check API key validity and permissions"
-        elif "429" in error_msg or "rate" in error_msg.lower():
-            result["guidance"] = "Rate limited - wait and retry"
-        elif "quota" in error_msg.lower():
-            result["guidance"] = "Add billing credits at platform.openai.com"
-        elif "404" in error_msg:
-            result["guidance"] = f"Model '{settings.openai_model}' not found"
-        else:
-            result["guidance"] = "Check Railway logs for details"
-    
-    return result
+        return {"success": False, "error_type": type(e).__name__, "error": str(e)[:200]}

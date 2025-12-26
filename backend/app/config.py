@@ -1,5 +1,6 @@
 """
 Saju AI Service Settings
+- 99,000원 프리미엄 리포트 설정 포함
 """
 from pydantic_settings import BaseSettings
 from typing import List
@@ -24,20 +25,24 @@ class Settings(BaseSettings):
     port: int = 8000
     debug: bool = False
     
-    # ============ 30페이지 프리미엄 리포트 설정 ============
+    # ============ 99,000원 프리미엄 리포트 설정 ============
     
-    # 섹션별 토큰 제한
-    report_section_max_output_tokens: int = 4000  # 섹션당 최대 출력 토큰
-    report_section_max_rulecards: int = 60  # 섹션당 최대 룰카드 수
+    # 섹션별 토큰 제한 (프리미엄은 더 길게)
+    report_section_max_output_tokens: int = 4500  # 섹션당 최대 출력 토큰
+    report_section_max_rulecards: int = 80  # 섹션당 최대 룰카드 수
     
     # 병렬 처리 설정
-    report_max_concurrency: int = 3  # 동시 GPT 호출 수 (레이트리밋 방지)
-    report_section_timeout: int = 60  # 섹션당 타임아웃 (초)
-    report_total_timeout: int = 300  # 전체 리포트 타임아웃 (5분)
+    report_max_concurrency: int = 2  # 동시 GPT 호출 수 (레이트리밋 방지)
+    report_section_timeout: int = 90  # 섹션당 타임아웃 (초) - 확장 루프 고려
+    report_total_timeout: int = 420  # 전체 리포트 타임아웃 (7분)
+    
+    # 분량 강제 설정
+    report_min_chars_multiplier: float = 1.0  # 최소 분량 배율 (1.0 = 기본, 1.5 = 50% 더)
+    report_max_expansion_retries: int = 2  # 분량 미달 시 최대 재시도 횟수
     
     # 폴백 설정
     report_enable_fallback: bool = True  # 실패 시 폴백 활성화
-    report_fallback_short_mode: bool = True  # 짧은 모드 재시도
+    report_partial_success: bool = True  # 부분 성공 허용 (일부 섹션 실패해도 반환)
     
     # 레거시 호환 (단일 호출 모드)
     max_output_tokens: int = 12000

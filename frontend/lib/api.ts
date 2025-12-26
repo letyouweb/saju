@@ -1,9 +1,6 @@
 /**
  * Railway 백엔드 API 통신 모듈
- * 
- * 아키텍처:
- * - Vercel (프론트엔드) → Railway (백엔드) 직접 통신
- * - CORS: Railway에서 sajuos.com 허용 설정됨
+ * - 99,000원 프리미엄 리포트: 7분 타임아웃
  */
 
 import type {
@@ -19,15 +16,12 @@ import type {
 
 function getApiBaseUrl(): string {
   const url = process.env.NEXT_PUBLIC_API_URL;
-  
   if (!url) {
     if (process.env.NODE_ENV === 'development') {
-      console.warn('⚠️ NEXT_PUBLIC_API_URL 미설정 → localhost:8000 사용');
       return 'http://localhost:8000';
     }
     return 'https://api.sajuos.com';
   }
-  
   return url;
 }
 
@@ -78,7 +72,7 @@ async function fetchApi<T>(
     
     if (error instanceof Error) {
       if (error.name === 'AbortError') {
-        throw new Error('서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+        throw new Error('프리미엄 보고서 생성 중입니다. 최대 5분까지 소요될 수 있습니다. 잠시만 기다려주세요.');
       }
       if (error.message.includes('fetch') || error.message.includes('Failed')) {
         throw new Error('서버에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.');
@@ -94,7 +88,6 @@ async function fetchApi<T>(
 
 /**
  * 사주 계산 API
- * POST /api/v1/calculate
  */
 export async function calculateSaju(
   data: CalculateRequest
@@ -106,26 +99,25 @@ export async function calculateSaju(
 }
 
 /**
- * 프리미엄 30페이지 보고서 생성 API
- * POST /api/v1/generate-report
- * 
- * 7개 섹션 병렬 생성 (약 2~3분 소요)
+ * 99,000원 프리미엄 비즈니스 컨설팅 보고서 API
+ * - 7개 섹션 병렬 생성
+ * - 최대 7분 소요 (420초)
  */
 export async function interpretSaju(
   data: InterpretRequest
 ): Promise<InterpretResponse> {
   const result = await fetchApi<InterpretResponse>(
-    '/api/v1/generate-report',
+    '/api/v1/generate-report?mode=premium',
     { 
       method: 'POST', 
       body: data, 
-      timeout: 300000 // 5분 (7섹션 병렬 생성 대응)
+      timeout: 420000 // 7분 (프리미엄 리포트용)
     }
   );
   
-  // 레거시 폴백 응답 체크
+  // 레거시 폴백 체크
   if ((result as any).model_used === 'fallback') {
-    throw new Error('AI 해석 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.');
+    throw new Error('AI 해석 서비스에 일시적인 문제가 발생했습니다.');
   }
   
   return result;
@@ -133,7 +125,6 @@ export async function interpretSaju(
 
 /**
  * 시간대 옵션 조회
- * GET /api/v1/calculate/hour-options
  */
 export async function getHourOptions(): Promise<HourOption[]> {
   return fetchApi<HourOption[]>(
@@ -143,7 +134,7 @@ export async function getHourOptions(): Promise<HourOption[]> {
 }
 
 /**
- * 고민 유형 조회 (로컬 데이터)
+ * 고민 유형 (로컬)
  */
 export function getConcernTypes(): { concern_types: ConcernOption[] } {
   return {
@@ -160,14 +151,13 @@ export function getConcernTypes(): { concern_types: ConcernOption[] } {
 
 /**
  * 헬스체크
- * GET /health
  */
 export async function healthCheck(): Promise<{ status: string }> {
   return fetchApi<{ status: string }>('/health', { timeout: 5000 });
 }
 
 /**
- * API 연결 테스트 (디버깅용)
+ * 연결 테스트
  */
 export async function testConnection(): Promise<{
   success: boolean;
