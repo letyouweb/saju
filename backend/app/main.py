@@ -104,6 +104,7 @@ app.add_middleware(
 app.include_router(calculate.router, prefix="/api/v1", tags=["Calculate"])
 app.include_router(interpret.router, prefix="/api/v1", tags=["Interpret"])
 app.include_router(reports.router, prefix="/api", tags=["Premium Reports"])
+app.include_router(reports.router, prefix="/api/v1", tags=["Premium Reports V1"])  # 🔥 Alias for consistency
 
 
 @app.get("/", tags=["System"])

@@ -236,7 +236,7 @@ export async function startReportGeneration(
   data: ReportStartRequest
 ): Promise<ReportStartResponse> {
   return fetchApi<ReportStartResponse>(
-    '/api/reports/start',
+    '/api/v1/reports/start',  // 🔥 통일: /api/v1 prefix
     { method: 'POST', body: data, timeout: 30000 }
   );
 }
@@ -248,7 +248,7 @@ export async function getReportStatus(
   reportId: string
 ): Promise<ReportStatusResponse> {
   return fetchApi<ReportStatusResponse>(
-    `/api/reports/${reportId}/status`,
+    `/api/v1/reports/${reportId}/status`,  // 🔥 통일
     { timeout: 10000 }
   );
 }
@@ -262,7 +262,7 @@ export async function getReportResult(
 ): Promise<ReportResultResponse> {
   const tokenParam = token ? `?token=${token}` : '';
   return fetchApi<ReportResultResponse>(
-    `/api/reports/${reportId}/result${tokenParam}`,
+    `/api/v1/reports/${reportId}/result${tokenParam}`,  // 🔥 통일
     { timeout: 10000 }
   );
 }
@@ -274,7 +274,7 @@ export async function getReportByToken(
   accessToken: string
 ): Promise<ReportResultResponse> {
   return fetchApi<ReportResultResponse>(
-    `/api/reports/view/${accessToken}`,
+    `/api/v1/reports/view/${accessToken}`,  // 🔥 통일
     { timeout: 10000 }
   );
 }
@@ -286,7 +286,7 @@ export async function retryReport(
   reportId: string
 ): Promise<{ success: boolean; message: string }> {
   return fetchApi<{ success: boolean; message: string }>(
-    `/api/reports/${reportId}/retry`,
+    `/api/v1/reports/${reportId}/retry`,  // 🔥 통일
     { method: 'POST', timeout: 10000 }
   );
 }
