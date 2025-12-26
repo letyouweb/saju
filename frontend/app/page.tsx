@@ -3,17 +3,21 @@
 import { useState } from 'react';
 import SajuForm from '@/components/SajuForm';
 import ResultCard from '@/components/ResultCard';
+import ProgressStepper from '@/components/ProgressStepper';
 import type { CalculateResponse, InterpretResponse, ConcernType } from '@/types';
-import { calculateSaju, interpretSaju } from '@/lib/api';
+import { calculateSaju, startReportGeneration } from '@/lib/api';
+
+type Step = 'input' | 'calculating' | 'generating' | 'result';
 
 export default function Home() {
   const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주OS';
   const BRAND_TAGLINE = process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? '당신의 사주를 한 번에 정리해드려요';
 
   const getTodayKst = () =>
-    new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }); // YYYY-MM-DD
+    new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' });
 
-  const [step, setStep] = useState<'input' | 'loading' | 'result'>('input');
+  const [step, setStep] = useState<Step>('input');
+  const [jobId, setJobId] = useState<string | null>(null);
   const [calculateResult, setCalculateResult] = useState<CalculateResponse | null>(null);
   const [interpretResult, setInterpretResult] = useState<InterpretResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,8 +33,9 @@ export default function Home() {
     concernType: ConcernType;
     question: string;
   }) => {
-    setStep('loading');
+    setStep('calculating');
     setError(null);
+    setJobId(null);
 
     try {
       // 1. 사주 계산 (절기 기반)
@@ -44,19 +49,22 @@ export default function Home() {
       });
       setCalculateResult(calcResult);
 
-      // 2. 사주 해석 (오늘 날짜 자동 삽입 → 연도 착각 방지)
+      // 2. 비동기 프리미엄 리포트 생성 시작 (SSE)
       const todayKst = getTodayKst();
       const questionWithDate = `${formData.question}\n\n(기준일: ${todayKst} KST)`;
-      const interpResult = await interpretSaju({
+      
+      const asyncResponse = await startReportGeneration({
         saju_result: calcResult,
         name: formData.name,
         gender: formData.gender,
         concern_type: formData.concernType,
         question: questionWithDate,
       });
-      setInterpretResult(interpResult);
 
-      setStep('result');
+      // Job ID 저장 → ProgressStepper에 전달
+      setJobId(asyncResponse.job_id);
+      setStep('generating');
+
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다.';
       setError(errorMessage);
@@ -64,8 +72,21 @@ export default function Home() {
     }
   };
 
+  const handleReportComplete = (result: any) => {
+    // SSE 완료 시 결과 설정
+    setInterpretResult(result);
+    setStep('result');
+  };
+
+  const handleReportError = (errorMsg: string) => {
+    setError(errorMsg);
+    setStep('input');
+    setJobId(null);
+  };
+
   const handleReset = () => {
     setStep('input');
+    setJobId(null);
     setCalculateResult(null);
     setInterpretResult(null);
     setError(null);
@@ -100,12 +121,23 @@ export default function Home() {
       {/* Step: Input Form */}
       {step === 'input' && <SajuForm onSubmit={handleSubmit} />}
 
-      {/* Step: Loading */}
-      {step === 'loading' && (
+      {/* Step: Calculating (사주 계산 중) */}
+      {step === 'calculating' && (
         <div className="flex flex-col items-center justify-center py-20 animate-fade-in-up">
           <div className="w-16 h-16 border-4 border-purple-200 border-t-purple-600 rounded-full animate-spin mb-6" />
-          <p className="text-xl font-medium text-slate-700">사주를 분석중입니다...</p>
-          <p className="text-slate-500 mt-2">잠시만 기다려 주세요 🌟</p>
+          <p className="text-xl font-medium text-slate-700">사주 원국 계산 중...</p>
+          <p className="text-slate-500 mt-2">절기 기반 정확한 계산 🌟</p>
+        </div>
+      )}
+
+      {/* Step: Generating (SSE 실시간 진행) */}
+      {step === 'generating' && (
+        <div className="animate-fade-in-up">
+          <ProgressStepper
+            jobId={jobId}
+            onComplete={handleReportComplete}
+            onError={handleReportError}
+          />
         </div>
       )}
 
