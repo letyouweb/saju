@@ -1,3 +1,11 @@
+@app.get("/")
+def read_root():
+    return {"message": "SajuOS API is running"}
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
 import os
 import json
 from fastapi import FastAPI, HTTPException, Request
