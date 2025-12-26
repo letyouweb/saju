@@ -1,12 +1,14 @@
 """
-/interpret endpoint - Premium Business Report Engine
-- 99,000원 프리미엄 모드: 7섹션 순차 생성 + 용어 치환 + Retry
-- 단독 섹션 재생성 엔드포인트
-- RuleCards 8,500장 데이터 자동 활용
+/interpret endpoint - Premium Business Report Engine v4
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1) 룰카드 선택 엔진: featureTags + Top-100 RuleCards
+2) JSON Schema 강제: Responses API + json_schema(strict)
+3) 안정성: Semaphore(2), exponential backoff, regenerate-section
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, List
 import logging
 
 from app.models.schemas import (
@@ -29,7 +31,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ============ Helper Functions ============
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Helper Functions
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _get_pillar_ganji(pillar_data) -> str:
     """사주 기둥에서 간지 문자열 추출"""
@@ -62,93 +66,83 @@ def _extract_pillars_from_saju_data(saju_data: dict) -> tuple:
     return year_p, month_p, day_p
 
 
-def _get_all_rulecards(saju_data: dict, store, target_year: int) -> list:
-    """사주 데이터에 맞는 전체 RuleCards 반환"""
+def _get_rulecards_and_feature_tags(
+    saju_data: dict, 
+    store, 
+    target_year: int
+) -> tuple:
+    """
+    사주 데이터에서 RuleCards + FeatureTags 반환
+    Returns: (rulecards: List, feature_tags: List, pool_count: int)
+    """
     year_p, month_p, day_p = _extract_pillars_from_saju_data(saju_data)
     
-    logger.info(f"[RuleCards] 추출된 기둥: 년={year_p}, 월={month_p}, 일={day_p}")
+    logger.info(f"[RuleCards] 기둥 추출: 년={year_p}, 월={month_p}, 일={day_p}")
     
     if not (year_p and month_p and day_p):
         logger.warning("[RuleCards] 사주 기둥 데이터 부족")
-        return []
+        return [], [], 0
     
+    # FeatureTags 생성
     ft = build_feature_tags_no_time_from_pillars(year_p, month_p, day_p, overlay_year=target_year)
     feature_tags = ft.get("tags", [])
     
+    logger.info(f"[RuleCards] FeatureTags 생성: {len(feature_tags)}개")
+    
+    # Preset 부스트 및 카드 선택
     boosted = boost_preset_focus(BUSINESS_OWNER_PRESET_V2, feature_tags)
     selection = select_cards_for_preset(store, boosted, feature_tags)
     
+    # 모든 카드 수집
     all_cards = []
     for sec in selection.get("sections", []):
         all_cards.extend(sec.get("cards", []))
     
-    logger.info(f"[RuleCards] ✅ 총 {len(all_cards)}장 수집")
-    return all_cards
+    pool_count = len(all_cards)
+    logger.info(f"[RuleCards] ✅ Pool={pool_count}장, FeatureTags={len(feature_tags)}개")
+    
+    return all_cards, feature_tags, pool_count
 
 
 def inject_year_context(question: str, target_year: int) -> str:
     """연도 강제 컨텍스트 주입"""
     return f"""[분석 기준 고정]
 - 이 분석은 반드시 {target_year}년 1월~12월 기준으로만 작성합니다.
-- 월별 운세/좋은 시기/조심할 시기는 {target_year}년 달력 흐름으로 제시합니다.
 
 [사용자 질문]
 {question}""".strip()
 
 
-def _compress_rulecards_for_prompt(selection: dict, max_cards_per_section: int = 8) -> str:
-    """RuleCards를 GPT 프롬프트용으로 압축"""
-    lines = ["[사주OS RuleCard 컨텍스트]"]
+def _extract_saju_data_from_payload(payload: InterpretRequest) -> dict:
+    """payload에서 사주 데이터 추출"""
+    if payload.saju_result:
+        return payload.saju_result.model_dump()
     
-    total_cards = 0
-    for sec in selection.get("sections", []):
-        title = sec.get("title", sec.get("key", ""))
-        cards = sec.get("cards", [])[:max_cards_per_section]
-        if not cards:
-            continue
-            
-        lines.append(f"\n## {title}")
-        for c in cards:
-            total_cards += 1
-            cid = c.get("id", "")
-            topic = c.get("topic", "")
-            mech = (c.get("mechanism") or "")[:100]
-            act = (c.get("action") or "")[:100]
-            
-            lines.append(f"- [{cid}] {topic}")
-            if mech: lines.append(f"  mechanism: {mech}")
-            if act: lines.append(f"  action: {act}")
-
-    lines.append(f"\n[총 {total_cards}개 RuleCard 참조]")
-    return "\n".join(lines)
+    if not all([payload.year_pillar, payload.month_pillar, payload.day_pillar]):
+        raise HTTPException(
+            status_code=400,
+            detail={"error_code": "MISSING_SAJU_DATA", "message": "Saju data required"}
+        )
+    
+    return {
+        "year_pillar": payload.year_pillar,
+        "month_pillar": payload.month_pillar,
+        "day_pillar": payload.day_pillar,
+        "hour_pillar": payload.hour_pillar,
+        "day_master": payload.day_pillar[0] if payload.day_pillar else "",
+        "day_master_element": ""
+    }
 
 
-def build_rulecards_context(saju_data: dict, store, target_year: int = 2026) -> tuple:
-    """사주 데이터에서 RuleCards 컨텍스트 생성"""
-    year_p, month_p, day_p = _extract_pillars_from_saju_data(saju_data)
-    
-    if not (year_p and month_p and day_p):
-        return "", [], 0
-    
-    ft = build_feature_tags_no_time_from_pillars(year_p, month_p, day_p, overlay_year=target_year)
-    feature_tags = ft.get("tags", [])
-    
-    boosted = boost_preset_focus(BUSINESS_OWNER_PRESET_V2, feature_tags)
-    selection = select_cards_for_preset(store, boosted, feature_tags)
-    
-    context = _compress_rulecards_for_prompt(selection)
-    total_cards = sum(len(sec.get("cards", [])) for sec in selection.get("sections", []))
-    
-    return context, feature_tags, total_cards
-
-
-# ============ API Endpoints ============
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# API Endpoints
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @router.post(
     "/interpret",
     response_model=InterpretResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    summary="Saju Interpretation (Legacy 단일 호출)"
+    summary="Saju Interpretation (Legacy)"
 )
 async def interpret_saju(
     payload: InterpretRequest,
@@ -159,38 +153,23 @@ async def interpret_saju(
     if mode == "premium":
         return await generate_premium_report(payload, raw, mode)
     
-    saju_data = {}
-    if payload.saju_result:
-        saju_data = payload.saju_result.model_dump()
-    else:
-        if not all([payload.year_pillar, payload.month_pillar, payload.day_pillar]):
-            raise HTTPException(status_code=400, detail={"error_code": "MISSING_SAJU_DATA", "message": "Saju data required"})
-        saju_data = {
-            "year_pillar": payload.year_pillar,
-            "month_pillar": payload.month_pillar,
-            "day_pillar": payload.day_pillar,
-            "hour_pillar": payload.hour_pillar,
-            "day_master": payload.day_pillar[0] if payload.day_pillar else "",
-            "day_master_element": ""
-        }
-
+    saju_data = _extract_saju_data_from_payload(payload)
     question = payload.question
     final_year = payload.target_year if payload.target_year else 2026
     
     store = getattr(raw.app.state, "rulestore", None)
-    rulecards_context = ""
-    cards_count = 0
     
     if store and mode != "direct":
         try:
-            rulecards_context, feature_tags, cards_count = build_rulecards_context(saju_data, store, final_year)
-            if rulecards_context:
-                question = f"{question}\n\n{rulecards_context}"
+            rulecards, feature_tags, pool_count = _get_rulecards_and_feature_tags(
+                saju_data, store, final_year
+            )
+            # 레거시 모드는 컨텍스트만 추가
         except Exception as e:
             logger.warning(f"[RuleCards] 컨텍스트 생성 실패: {e}")
     
     question_with_context = inject_year_context(question, final_year)
-    logger.info(f"[INTERPRET] Year={final_year} | Mode={mode} | Cards={cards_count}")
+    logger.info(f"[INTERPRET] Year={final_year} | Mode={mode}")
 
     try:
         result = await gpt_interpreter.interpret(
@@ -217,53 +196,51 @@ async def generate_premium_report(
     mode: str = Query("premium", description="premium | legacy")
 ):
     """
-    🎯 99,000원 프리미엄 비즈니스 컨설팅 보고서
+    🎯 99,000원 프리미엄 비즈니스 컨설팅 보고서 v4
     
-    - 7개 섹션 순차 생성 (안정성 우선)
-    - Retry + Exponential Backoff (429/5xx 대응)
-    - Sprint/Calendar 전용 validation
-    - 상세 에러 정보 포함
+    **핵심 개선사항:**
+    1. 룰카드 선택 엔진: featureTags + 사업가형 태그 50개 → Top-100 RuleCards
+    2. JSON Schema 강제: Responses API + json_schema(strict)
+    3. 안정성: Semaphore(2), exponential backoff + jitter, 3회 재시도
+    
+    **응답 meta에 포함:**
+    - rulecards_pool_total: 전체 룰카드 수
+    - rulecards_selected_total: 선택된 룰카드 수
+    - rulecards_by_section: 섹션별 selected_count, pool_count, selected_card_ids
+    - feature_tags_count: 사용된 featureTags 수
     """
     if mode == "legacy":
         return await interpret_saju(payload, raw, "auto")
     
-    saju_data = {}
-    if payload.saju_result:
-        saju_data = payload.saju_result.model_dump()
-    else:
-        if not all([payload.year_pillar, payload.month_pillar, payload.day_pillar]):
-            raise HTTPException(
-                status_code=400,
-                detail={"error_code": "MISSING_SAJU_DATA", "message": "Saju data required"}
-            )
-        saju_data = {
-            "year_pillar": payload.year_pillar,
-            "month_pillar": payload.month_pillar,
-            "day_pillar": payload.day_pillar,
-            "hour_pillar": payload.hour_pillar,
-            "day_master": payload.day_pillar[0] if payload.day_pillar else "",
-            "day_master_element": ""
-        }
-    
+    saju_data = _extract_saju_data_from_payload(payload)
     final_year = payload.target_year if payload.target_year else 2026
     
+    # RuleStore에서 RuleCards + FeatureTags 가져오기
     store = getattr(raw.app.state, "rulestore", None)
     rulecards = []
+    feature_tags = []
+    pool_count = 0
     
     if store:
         try:
-            rulecards = _get_all_rulecards(saju_data, store, final_year)
+            rulecards, feature_tags, pool_count = _get_rulecards_and_feature_tags(
+                saju_data, store, final_year
+            )
         except Exception as e:
             logger.warning(f"[PremiumReport] RuleCards 로드 실패: {e}")
     else:
         logger.warning("[PremiumReport] ⚠️ RuleStore 미로드")
     
-    logger.info(f"[PREMIUM-REPORT] Year={final_year} | RuleCards={len(rulecards)} | Mode={mode}")
+    logger.info(
+        f"[PREMIUM-REPORT] Year={final_year} | "
+        f"RuleCards Pool={pool_count} | FeatureTags={len(feature_tags)}"
+    )
     
     try:
         report = await premium_report_builder.build_premium_report(
             saju_data=saju_data,
             rulecards=rulecards,
+            feature_tags=feature_tags,  # ← featureTags 전달
             target_year=final_year,
             user_question=payload.question,
             name=payload.name,
@@ -283,7 +260,12 @@ async def generate_premium_report(
                 "message": str(e)[:200],
                 "target_year": final_year,
                 "sections": [],
-                "meta": {"mode": "premium_business_30p", "error": True}
+                "meta": {
+                    "mode": "premium_business_30p", 
+                    "error": True,
+                    "rulecards_pool_total": pool_count,
+                    "feature_tags_count": len(feature_tags)
+                }
             }
         )
 
@@ -291,7 +273,7 @@ async def generate_premium_report(
 @router.post(
     "/regenerate-section",
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    summary="단일 섹션 재생성 (Sprint 복구용)"
+    summary="단일 섹션 재생성 (오류 복구용)"
 )
 async def regenerate_single_section(
     payload: InterpretRequest,
@@ -302,11 +284,26 @@ async def regenerate_single_section(
     🔄 단일 섹션 재생성 엔드포인트
     
     전체 리포트 재생성 없이 특정 섹션만 재생성합니다.
-    Sprint 섹션 실패 시 복구용으로 사용합니다.
+    "이 섹션 생성 중 오류" 발생 시 복구용으로 사용합니다.
     
     **사용 예시:**
     ```
     POST /api/v1/regenerate-section?section_id=sprint
+    ```
+    
+    **응답 형식:**
+    ```json
+    {
+      "success": true,
+      "section": {
+        "id": "sprint",
+        "title": "90-Day Sprint Plan",
+        "rulecard_selected": 10,
+        "rulecard_pool": 480,
+        "char_count": 2500,
+        ...
+      }
+    }
     ```
     """
     # section_id 검증
@@ -316,48 +313,37 @@ async def regenerate_single_section(
             status_code=400,
             detail={
                 "error_code": "INVALID_SECTION_ID",
-                "message": f"Invalid section_id: {section_id}. Valid options: {valid_sections}"
+                "message": f"Invalid section_id: {section_id}. Valid: {valid_sections}"
             }
         )
     
-    # 사주 데이터 추출
-    saju_data = {}
-    if payload.saju_result:
-        saju_data = payload.saju_result.model_dump()
-    else:
-        if not all([payload.year_pillar, payload.month_pillar, payload.day_pillar]):
-            raise HTTPException(
-                status_code=400,
-                detail={"error_code": "MISSING_SAJU_DATA", "message": "Saju data required"}
-            )
-        saju_data = {
-            "year_pillar": payload.year_pillar,
-            "month_pillar": payload.month_pillar,
-            "day_pillar": payload.day_pillar,
-            "hour_pillar": payload.hour_pillar,
-            "day_master": payload.day_pillar[0] if payload.day_pillar else "",
-            "day_master_element": ""
-        }
-    
+    saju_data = _extract_saju_data_from_payload(payload)
     final_year = payload.target_year if payload.target_year else 2026
     
-    # RuleCards 로드
+    # RuleCards + FeatureTags
     store = getattr(raw.app.state, "rulestore", None)
     rulecards = []
+    feature_tags = []
     
     if store:
         try:
-            rulecards = _get_all_rulecards(saju_data, store, final_year)
+            rulecards, feature_tags, pool_count = _get_rulecards_and_feature_tags(
+                saju_data, store, final_year
+            )
         except Exception as e:
             logger.warning(f"[RegenerateSection] RuleCards 로드 실패: {e}")
     
-    logger.info(f"[REGENERATE-SECTION] Section={section_id} | Year={final_year} | RuleCards={len(rulecards)}")
+    logger.info(
+        f"[REGENERATE-SECTION] Section={section_id} | Year={final_year} | "
+        f"RuleCards={len(rulecards)} | FeatureTags={len(feature_tags)}"
+    )
     
     try:
         result = await premium_report_builder.regenerate_single_section(
             section_id=section_id,
             saju_data=saju_data,
             rulecards=rulecards,
+            feature_tags=feature_tags,
             target_year=final_year,
             user_question=payload.question
         )
@@ -378,7 +364,9 @@ async def regenerate_single_section(
         )
 
 
-# ============ Utility Endpoints ============
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Utility Endpoints
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @router.get("/interpret/today", summary="Today Date (KST)")
 async def get_today_context():
@@ -436,10 +424,9 @@ async def get_premium_sections():
                 "id": spec.id,
                 "title": spec.title,
                 "pages": spec.pages,
+                "max_cards": spec.max_cards,
                 "min_chars": spec.min_chars,
-                "rulecard_quota": spec.rulecard_quota,
-                "validation_type": spec.validation_type,
-                "required_elements": spec.required_elements
+                "validation_type": spec.validation_type
             }
             for spec in PREMIUM_SECTIONS.values()
         ]

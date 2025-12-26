@@ -1,21 +1,20 @@
 """
-SajuOS Premium Report Builder v3
-- 99,000원 30페이지 비즈니스 컨설팅 리포트 엔진
-- 7개 섹션 분할 생성 (Chaining) + 순차 처리 (안정성 우선)
-- Retry + Exponential Backoff (429/5xx 대응)
-- Sprint 섹션 전용 validation
-- 상세 에러 로깅
+SajuOS Premium Report Builder v5
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 핵심 수정: 전역 Top-100 RuleCards 먼저 선별 → 섹션 분배
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1) 룰카드 선택 엔진: 전체 풀에서 Top-100 전역 선택 → 섹션별 분배
+2) JSON Schema 강제: response_format + json_schema(strict=True)
+3) 안정성: Semaphore(1), exponential backoff + jitter, 재시도 3회
 """
 import asyncio
 import logging
 import time
 import json
-import re
 import random
-import traceback
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from openai import AsyncOpenAI, APIError, RateLimitError, APIConnectionError, APITimeoutError
 import httpx
@@ -25,629 +24,547 @@ from app.services.openai_key import get_openai_api_key
 from app.services.terminology_mapper import (
     sanitize_for_business,
     get_business_prompt_rules,
-    validate_no_forbidden_terms
 )
 
 logger = logging.getLogger(__name__)
 
 
-# ============ 섹션 정의 (프리미엄 스펙) ============
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 1. 사업가형 핵심 태그 50개
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BUSINESS_OWNER_CORE_TAGS = [
+    # 재물/현금흐름 (15개)
+    "정재", "편재", "재성", "재물", "부", "현금", "매출", "수익", "투자", 
+    "자산", "유동성", "손실", "파산", "횡재", "도둑",
+    # 사업/커리어 (15개)
+    "정관", "편관", "관성", "직장", "사업", "창업", "경영", "리더십", 
+    "승진", "이직", "독립", "프리랜서", "계약", "거래", "파트너",
+    # 실행력/생산성 (10개)
+    "식신", "상관", "식상", "실행", "생산", "창작", "마케팅", "혁신", 
+    "출력", "성과",
+    # 인맥/관계 (5개)
+    "비겁", "비견", "겁재", "동업", "경쟁",
+    # 지식/브랜드 (5개)
+    "인성", "정인", "편인", "학습", "브랜드"
+]
+
+# 섹션별 가중치 태그
+SECTION_WEIGHT_TAGS: Dict[str, List[str]] = {
+    "exec": ["전체운", "종합", "핵심", "요약", "일간", "성향"],
+    "money": ["정재", "편재", "재성", "재물", "현금", "매출", "투자", "손실"],
+    "business": ["정관", "편관", "사업", "창업", "경영", "리더십", "계약", "거래"],
+    "team": ["비겁", "비견", "겁재", "동업", "파트너", "직원", "관계", "협력"],
+    "health": ["건강", "에너지", "스트레스", "번아웃", "체력", "질병", "휴식"],
+    "calendar": ["월운", "시기", "계절", "타이밍", "길일", "흉일", "절기"],
+    "sprint": ["실행", "액션", "계획", "목표", "KPI", "마일스톤", "주간"]
+}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 2. 섹션 정의
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @dataclass
 class SectionSpec:
     id: str
     title: str
     pages: int
-    rulecard_quota: int
-    topics: List[str]
-    min_chars: int  # 최소 글자수
-    required_elements: List[str]  # 필수 포함 요소
-    validation_type: str = "standard"  # standard | sprint | calendar
-    
+    max_cards: int  # 이 섹션에 할당할 최대 카드 수 (from Top-100)
+    min_chars: int
+    validation_type: str = "standard"
+
 
 PREMIUM_SECTIONS: Dict[str, SectionSpec] = {
-    "exec": SectionSpec(
-        id="exec",
-        title="Executive Summary",
-        pages=2,
-        rulecard_quota=50,
-        topics=["general", "personality", "yearly_fortune"],
-        min_chars=2000,
-        required_elements=[
-            "현상 진단",
-            "핵심 가설 3개",
-            "전략적 방향성",
-            "즉시 실행 과제 5개",
-            "핵심 KPI 3개"
-        ],
-        validation_type="standard"
-    ),
-    "money": SectionSpec(
-        id="money",
-        title="Money & Cashflow",
-        pages=5,
-        rulecard_quota=80,
-        topics=["wealth", "finance", "investment"],
-        min_chars=4000,
-        required_elements=[
-            "현금흐름 현상 진단",
-            "수익 구조 가설 3개",
-            "전략 옵션 3개(각각 장단점)",
-            "추천 전략 + 주간 실행 계획",
-            "재무 KPI 5개",
-            "리스크 시나리오 3개 + 방어 전략"
-        ],
-        validation_type="standard"
-    ),
-    "business": SectionSpec(
-        id="business",
-        title="Business Strategy",
-        pages=5,
-        rulecard_quota=80,
-        topics=["career", "business", "leadership"],
-        min_chars=4000,
-        required_elements=[
-            "시장 포지션 진단",
-            "성장 가설 3개",
-            "전략 옵션 3개(장단점 포함)",
-            "추천 전략 + 분기별 실행 로드맵",
-            "성과 KPI 5개",
-            "경쟁 리스크 분석 + 대응"
-        ],
-        validation_type="standard"
-    ),
-    "team": SectionSpec(
-        id="team",
-        title="Team & Partner Risk",
-        pages=4,
-        rulecard_quota=60,
-        topics=["relationship", "partnership", "conflict"],
-        min_chars=3000,
-        required_elements=[
-            "조직/파트너십 현상 진단",
-            "관계 역학 가설 3개",
-            "팀 구성 전략 옵션 3개",
-            "추천 인재/파트너 프로파일",
-            "갈등 조기 경보 지표",
-            "위기 대응 프로토콜"
-        ],
-        validation_type="standard"
-    ),
-    "health": SectionSpec(
-        id="health",
-        title="Health & Performance",
-        pages=3,
-        rulecard_quota=50,
-        topics=["health", "energy", "wellness"],
-        min_chars=2500,
-        required_elements=[
-            "에너지/퍼포먼스 현상 진단",
-            "번아웃 리스크 가설 3개",
-            "워라밸 전략 옵션 3개",
-            "주간 루틴 권장안",
-            "건강 KPI (체크 주기 포함)",
-            "위험 신호 + 대응"
-        ],
-        validation_type="standard"
-    ),
-    "calendar": SectionSpec(
-        id="calendar",
-        title="12-Month Tactical Calendar",
-        pages=6,
-        rulecard_quota=100,
-        topics=["monthly", "timing", "seasonal"],
-        min_chars=4000,
-        required_elements=[
-            "연간 전략 테마",
-            "12개월 월별 분석",
-            "분기별 마일스톤"
-        ],
-        validation_type="calendar"
-    ),
-    "sprint": SectionSpec(
-        id="sprint",
-        title="90-Day Sprint Plan",
-        pages=5,
-        rulecard_quota=80,
-        topics=["action", "planning", "execution"],
-        min_chars=3000,
-        required_elements=[
-            "90일 미션 선언문",
-            "주간 실행 계획",
-            "마일스톤"
-        ],
-        validation_type="sprint"
-    )
+    "exec": SectionSpec(id="exec", title="Executive Summary", pages=2, max_cards=15, min_chars=1500, validation_type="standard"),
+    "money": SectionSpec(id="money", title="Money & Cashflow", pages=5, max_cards=18, min_chars=2500, validation_type="standard"),
+    "business": SectionSpec(id="business", title="Business Strategy", pages=5, max_cards=18, min_chars=2500, validation_type="standard"),
+    "team": SectionSpec(id="team", title="Team & Partner Risk", pages=4, max_cards=15, min_chars=2000, validation_type="standard"),
+    "health": SectionSpec(id="health", title="Health & Performance", pages=3, max_cards=12, min_chars=1500, validation_type="standard"),
+    "calendar": SectionSpec(id="calendar", title="12-Month Calendar", pages=6, max_cards=12, min_chars=2500, validation_type="calendar"),
+    "sprint": SectionSpec(id="sprint", title="90-Day Sprint Plan", pages=5, max_cards=10, min_chars=2000, validation_type="sprint")
+}
+
+# 합계 = 15+18+18+15+12+12+10 = 100 (정확히 100장)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 3. JSON Schema (Structured Outputs)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STANDARD_SECTION_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "standard_section",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "diagnosis": {
+                    "type": "object",
+                    "properties": {
+                        "current_state": {"type": "string"},
+                        "key_issues": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["current_state", "key_issues"],
+                    "additionalProperties": False
+                },
+                "hypotheses": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "statement": {"type": "string"},
+                            "confidence": {"type": "string"},
+                            "evidence": {"type": "string"}
+                        },
+                        "required": ["id", "statement", "confidence", "evidence"],
+                        "additionalProperties": False
+                    }
+                },
+                "strategy_options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "pros": {"type": "array", "items": {"type": "string"}},
+                            "cons": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["id", "name", "description", "pros", "cons"],
+                        "additionalProperties": False
+                    }
+                },
+                "recommended_strategy": {
+                    "type": "object",
+                    "properties": {
+                        "selected_option": {"type": "string"},
+                        "rationale": {"type": "string"},
+                        "execution_plan": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "week": {"type": "integer"},
+                                    "focus": {"type": "string"},
+                                    "actions": {"type": "array", "items": {"type": "string"}}
+                                },
+                                "required": ["week", "focus", "actions"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+                    "required": ["selected_option", "rationale", "execution_plan"],
+                    "additionalProperties": False
+                },
+                "kpis": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "metric": {"type": "string"},
+                            "target": {"type": "string"},
+                            "measurement": {"type": "string"}
+                        },
+                        "required": ["metric", "target", "measurement"],
+                        "additionalProperties": False
+                    }
+                },
+                "risks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "risk": {"type": "string"},
+                            "probability": {"type": "string"},
+                            "impact": {"type": "string"},
+                            "mitigation": {"type": "string"}
+                        },
+                        "required": ["risk", "probability", "impact", "mitigation"],
+                        "additionalProperties": False
+                    }
+                },
+                "body_markdown": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "required": ["title", "diagnosis", "hypotheses", "strategy_options", 
+                        "recommended_strategy", "kpis", "risks", "body_markdown", "confidence"],
+            "additionalProperties": False
+        }
+    }
+}
+
+SPRINT_SECTION_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "sprint_section",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "mission_statement": {"type": "string"},
+                "weekly_plans": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "week": {"type": "integer"},
+                            "theme": {"type": "string"},
+                            "goals": {"type": "array", "items": {"type": "string"}},
+                            "daily_actions": {"type": "array", "items": {"type": "string"}},
+                            "kpis": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["week", "theme", "goals", "daily_actions", "kpis"],
+                        "additionalProperties": False
+                    }
+                },
+                "milestones": {
+                    "type": "object",
+                    "properties": {
+                        "day_30": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "success_criteria": {"type": "string"},
+                                "deliverables": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["goal", "success_criteria", "deliverables"],
+                            "additionalProperties": False
+                        },
+                        "day_60": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "success_criteria": {"type": "string"},
+                                "deliverables": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["goal", "success_criteria", "deliverables"],
+                            "additionalProperties": False
+                        },
+                        "day_90": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "success_criteria": {"type": "string"},
+                                "deliverables": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["goal", "success_criteria", "deliverables"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "required": ["day_30", "day_60", "day_90"],
+                    "additionalProperties": False
+                },
+                "risk_scenarios": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scenario": {"type": "string"},
+                            "trigger": {"type": "string"},
+                            "pivot_plan": {"type": "string"}
+                        },
+                        "required": ["scenario", "trigger", "pivot_plan"],
+                        "additionalProperties": False
+                    }
+                },
+                "body_markdown": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "required": ["title", "mission_statement", "weekly_plans", "milestones", 
+                        "risk_scenarios", "body_markdown", "confidence"],
+            "additionalProperties": False
+        }
+    }
+}
+
+CALENDAR_SECTION_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "calendar_section",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "annual_theme": {"type": "string"},
+                "monthly_plans": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "month": {"type": "integer"},
+                            "month_name": {"type": "string"},
+                            "theme": {"type": "string"},
+                            "energy_level": {"type": "string"},
+                            "key_focus": {"type": "string"},
+                            "recommended_actions": {"type": "array", "items": {"type": "string"}},
+                            "cautions": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["month", "month_name", "theme", "energy_level", 
+                                    "key_focus", "recommended_actions", "cautions"],
+                        "additionalProperties": False
+                    }
+                },
+                "quarterly_milestones": {
+                    "type": "object",
+                    "properties": {
+                        "Q1": {"type": "object", "properties": {"theme": {"type": "string"}, "milestone": {"type": "string"}, "key_metric": {"type": "string"}}, "required": ["theme", "milestone", "key_metric"], "additionalProperties": False},
+                        "Q2": {"type": "object", "properties": {"theme": {"type": "string"}, "milestone": {"type": "string"}, "key_metric": {"type": "string"}}, "required": ["theme", "milestone", "key_metric"], "additionalProperties": False},
+                        "Q3": {"type": "object", "properties": {"theme": {"type": "string"}, "milestone": {"type": "string"}, "key_metric": {"type": "string"}}, "required": ["theme", "milestone", "key_metric"], "additionalProperties": False},
+                        "Q4": {"type": "object", "properties": {"theme": {"type": "string"}, "milestone": {"type": "string"}, "key_metric": {"type": "string"}}, "required": ["theme", "milestone", "key_metric"], "additionalProperties": False}
+                    },
+                    "required": ["Q1", "Q2", "Q3", "Q4"],
+                    "additionalProperties": False
+                },
+                "peak_months": {"type": "array", "items": {"type": "string"}},
+                "risk_months": {"type": "array", "items": {"type": "string"}},
+                "body_markdown": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "required": ["title", "annual_theme", "monthly_plans", "quarterly_milestones",
+                        "peak_months", "risk_months", "body_markdown", "confidence"],
+            "additionalProperties": False
+        }
+    }
 }
 
 
-# ============ Sprint 전용 프롬프트 ============
+def get_section_schema(section_id: str) -> dict:
+    spec = PREMIUM_SECTIONS.get(section_id)
+    if not spec:
+        return STANDARD_SECTION_SCHEMA
+    if spec.validation_type == "sprint":
+        return SPRINT_SECTION_SCHEMA
+    elif spec.validation_type == "calendar":
+        return CALENDAR_SECTION_SCHEMA
+    return STANDARD_SECTION_SCHEMA
 
-def get_sprint_system_prompt(target_year: int) -> str:
-    """Sprint 섹션 전용 시스템 프롬프트 (간소화된 구조)"""
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 4. 🔥 전역 Top-100 RuleCard 선별 엔진
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@dataclass
+class GlobalRuleCardSelection:
+    """전역 Top-100 선별 결과"""
+    original_pool_count: int  # 원본 풀 크기 (예: 480)
+    top100_count: int  # Top-100 선별 크기 (정확히 100 또는 미만)
+    top100_cards: List[Dict[str, Any]]  # Top-100 카드 리스트
+    top100_card_ids: List[str]  # Top-100 카드 ID 리스트
+
+
+def score_rulecard_global(
+    card: Dict[str, Any],
+    feature_tags: List[str]
+) -> float:
+    """전역 RuleCard 점수화 (섹션 무관)"""
+    score = 0.0
     
-    terminology_rules = get_business_prompt_rules()
+    card_topic = (card.get("topic", "") or "").lower()
+    card_tags = [t.lower() for t in card.get("tags", [])]
+    card_text = f"{card_topic} {' '.join(card_tags)} {card.get('mechanism', '')} {card.get('action', '')}"
+    card_text_lower = card_text.lower()
     
-    return f"""당신은 99,000원 프리미엄 비즈니스 컨설팅 보고서를 작성하는 시니어 전략 컨설턴트입니다.
-
-## 분석 기준년도: {target_year}년
-
-{terminology_rules}
-
-## 이 섹션: 90-Day Sprint Plan
-구체적이고 실행 가능한 90일 액션 플랜을 작성합니다.
-
-## 출력 형식 (반드시 이 JSON 구조로만 응답)
-
-{{
-  "title": "90-Day Sprint Plan",
-  "mission_statement": "90일 동안 달성할 핵심 미션 (2-3문장)",
-  "weekly_plans": [
-    {{
-      "week": 1,
-      "theme": "주간 테마",
-      "goals": ["목표1", "목표2"],
-      "daily_actions": ["월요일 액션", "화요일 액션", "수요일 액션", "목요일 액션", "금요일 액션"],
-      "kpis": ["KPI1", "KPI2"],
-      "checkpoint": "주말 점검 사항"
-    }},
-    {{"week": 2, ...}},
-    ...최대 12주까지
-  ],
-  "milestones": {{
-    "day_30": {{"goal": "30일 목표", "success_criteria": "성공 기준", "deliverables": ["산출물1"]}},
-    "day_60": {{"goal": "60일 목표", "success_criteria": "성공 기준", "deliverables": ["산출물1"]}},
-    "day_90": {{"goal": "90일 목표", "success_criteria": "성공 기준", "deliverables": ["산출물1"]}}
-  }},
-  "risk_scenarios": [
-    {{"scenario": "실패 시나리오", "trigger": "발생 조건", "pivot_plan": "피벗 플랜"}}
-  ],
-  "body_markdown": "## 90-Day Sprint Plan\\n\\n(위 내용을 통합한 마크다운 본문, 3000자 이상)",
-  "confidence": "HIGH"
-}}
-
-중요: 반드시 위 JSON 구조로만 응답하세요. 마크다운 코드블록 없이 순수 JSON만 출력하세요.
-"""
-
-
-def get_calendar_system_prompt(target_year: int) -> str:
-    """Calendar 섹션 전용 시스템 프롬프트 (간소화된 구조)"""
+    # 1. featureTags 매칭 (최대 30점)
+    for ft in feature_tags:
+        if ft.lower() in card_text_lower:
+            score += 3.0
     
-    terminology_rules = get_business_prompt_rules()
+    # 2. 사업가형 핵심 태그 50개 매칭 (최대 50점)
+    for core_tag in BUSINESS_OWNER_CORE_TAGS:
+        if core_tag.lower() in card_text_lower:
+            score += 1.0
     
-    return f"""당신은 99,000원 프리미엄 비즈니스 컨설팅 보고서를 작성하는 시니어 전략 컨설턴트입니다.
-
-## 분석 기준년도: {target_year}년
-
-{terminology_rules}
-
-## 이 섹션: 12-Month Tactical Calendar
-{target_year}년 1월부터 12월까지 월별 전략 캘린더를 작성합니다.
-
-## 출력 형식 (반드시 이 JSON 구조로만 응답)
-
-{{
-  "title": "12-Month Tactical Calendar",
-  "annual_theme": "{target_year}년 연간 전략 테마 (1-2문장)",
-  "monthly_plans": [
-    {{
-      "month": 1,
-      "month_name": "1월",
-      "theme": "월간 테마",
-      "energy_level": "HIGH/MEDIUM/LOW",
-      "key_focus": "핵심 집중 영역",
-      "recommended_actions": ["권장 액션1", "권장 액션2", "권장 액션3"],
-      "cautions": ["금기 사항1", "금기 사항2"],
-      "kpi_targets": ["월간 KPI1", "월간 KPI2"]
-    }},
-    {{"month": 2, ...}},
-    ...12개월 전체
-  ],
-  "quarterly_milestones": {{
-    "Q1": {{"theme": "1분기 테마", "milestone": "마일스톤", "key_metric": "핵심 지표"}},
-    "Q2": {{"theme": "2분기 테마", "milestone": "마일스톤", "key_metric": "핵심 지표"}},
-    "Q3": {{"theme": "3분기 테마", "milestone": "마일스톤", "key_metric": "핵심 지표"}},
-    "Q4": {{"theme": "4분기 테마", "milestone": "마일스톤", "key_metric": "핵심 지표"}}
-  }},
-  "peak_months": ["최고 성과 예상 월 Top 3"],
-  "risk_months": ["고위험 월 + 대응 전략"],
-  "body_markdown": "## 12-Month Tactical Calendar\\n\\n(위 내용을 통합한 마크다운 본문, 4000자 이상)",
-  "confidence": "HIGH"
-}}
-
-중요: 반드시 위 JSON 구조로만 응답하세요. 마크다운 코드블록 없이 순수 JSON만 출력하세요.
-"""
+    return score
 
 
-def get_premium_system_prompt(section_id: str, target_year: int) -> str:
-    """프리미엄 섹션별 시스템 프롬프트"""
+def select_global_top100(
+    all_cards: List[Dict[str, Any]],
+    feature_tags: List[str],
+    top_limit: int = 100
+) -> GlobalRuleCardSelection:
+    """
+    🔥 전체 RuleCard 풀에서 Top-100만 전역 선별
+    """
+    original_pool = len(all_cards)
     
-    # Sprint/Calendar는 전용 프롬프트 사용
-    if section_id == "sprint":
-        return get_sprint_system_prompt(target_year)
-    if section_id == "calendar":
-        return get_calendar_system_prompt(target_year)
+    if original_pool == 0:
+        return GlobalRuleCardSelection(
+            original_pool_count=0,
+            top100_count=0,
+            top100_cards=[],
+            top100_card_ids=[]
+        )
     
+    # 1. 전체 카드 점수화
+    scored = []
+    for card in all_cards:
+        score = score_rulecard_global(card, feature_tags)
+        scored.append((score, card))
+    
+    # 2. 점수순 정렬 → Top-100
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top100 = [card for _, card in scored[:top_limit]]
+    
+    # 3. ID 추출
+    top100_ids = []
+    for card in top100:
+        cid = card.get("id", card.get("_id", f"card_{len(top100_ids)}"))
+        top100_ids.append(cid)
+    
+    logger.info(
+        f"[GlobalTop100] 전역 선별 완료 | "
+        f"Original Pool={original_pool} | Top100={len(top100)} | "
+        f"FeatureTags={len(feature_tags)}"
+    )
+    
+    return GlobalRuleCardSelection(
+        original_pool_count=original_pool,
+        top100_count=len(top100),
+        top100_cards=top100,
+        top100_card_ids=top100_ids
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 5. 섹션별 RuleCard 분배 (Top-100에서)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@dataclass
+class SectionRuleCardAllocation:
+    """섹션별 룰카드 할당 결과"""
+    section_id: str
+    allocated_count: int
+    allocated_card_ids: List[str]
+    context_text: str
+
+
+def allocate_rulecards_to_section(
+    top100_cards: List[Dict[str, Any]],
+    section_id: str,
+    max_cards: int,
+    already_used_ids: set
+) -> SectionRuleCardAllocation:
+    """
+    Top-100에서 섹션에 할당 (중복 방지)
+    """
+    spec = PREMIUM_SECTIONS.get(section_id)
+    section_tags = SECTION_WEIGHT_TAGS.get(section_id, [])
+    
+    # 섹션 관련도 점수 계산
+    scored = []
+    for card in top100_cards:
+        cid = card.get("id", card.get("_id", ""))
+        if cid in already_used_ids:
+            continue  # 이미 사용된 카드 제외
+        
+        card_text = f"{card.get('topic', '')} {card.get('mechanism', '')} {card.get('action', '')}"
+        card_text_lower = card_text.lower()
+        
+        section_score = 0
+        for st in section_tags:
+            if st.lower() in card_text_lower:
+                section_score += 2.0
+        
+        scored.append((section_score, card))
+    
+    # 섹션 관련도 순 정렬
+    scored.sort(key=lambda x: x[0], reverse=True)
+    allocated = [card for _, card in scored[:max_cards]]
+    
+    # 컨텍스트 텍스트 생성
+    lines = []
+    ids = []
+    for card in allocated:
+        cid = card.get("id", card.get("_id", f"card_{len(ids)}"))
+        ids.append(cid)
+        
+        topic = card.get("topic", "")
+        mechanism = sanitize_for_business((card.get("mechanism") or "")[:100])
+        action = sanitize_for_business((card.get("action") or "")[:100])
+        
+        line = f"[{cid}] {topic}"
+        if mechanism:
+            line += f" → {mechanism}"
+        if action:
+            line += f" | 액션: {action}"
+        lines.append(line)
+    
+    context = "\n".join(lines) if lines else "분석 데이터 없음"
+    
+    return SectionRuleCardAllocation(
+        section_id=section_id,
+        allocated_count=len(ids),
+        allocated_card_ids=ids,
+        context_text=context
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 6. 프롬프트 생성
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_section_system_prompt(section_id: str, target_year: int) -> str:
     spec = PREMIUM_SECTIONS.get(section_id)
     if not spec:
         spec = PREMIUM_SECTIONS["exec"]
     
     terminology_rules = get_business_prompt_rules()
     
-    base = f"""당신은 99,000원 프리미엄 비즈니스 컨설팅 보고서를 작성하는 시니어 전략 컨설턴트입니다.
-맥킨지, BCG, 베인 수준의 분석적 깊이와 실행 가능성을 갖춘 보고서를 작성합니다.
+    return f"""당신은 99,000원 프리미엄 비즈니스 컨설팅 보고서를 작성하는 시니어 전략 컨설턴트입니다.
 
 ## 분석 기준년도: {target_year}년
 
 ## 핵심 원칙
-1. **사주 풀이 금지**: 이 보고서는 '운세'가 아니라 '경영 전략 보고서'입니다
-2. **데이터 기반**: 제공된 RuleCard 데이터를 근거로 가설을 세우고 전략을 도출합니다
-3. **실행 가능성**: 모든 제안은 구체적 일정, 담당자, 예산 수준을 포함해야 합니다
-4. **측정 가능성**: 모든 목표는 KPI로 측정 가능해야 합니다
+1. 사주 풀이가 아닌 '경영 전략 보고서' 스타일로 작성
+2. 제공된 RuleCard 데이터를 근거로 가설과 전략 도출
+3. 구체적 일정, 숫자, KPI 포함
+4. 최소 {spec.min_chars}자 이상 작성
 
 {terminology_rules}
 
-## 이 섹션의 요구사항: {spec.title}
-- 최소 분량: {spec.min_chars}자 이상
-- 필수 포함 요소:
-{chr(10).join(f'  - {elem}' for elem in spec.required_elements)}
-
-## 출력 형식
-반드시 아래 JSON 구조로만 응답하세요 (마크다운 코드블록 없이):
-
-{{
-  "title": "{spec.title}",
-  "diagnosis": {{
-    "current_state": "현상 진단 (500자 이상)",
-    "key_issues": ["이슈1", "이슈2", "이슈3"]
-  }},
-  "hypotheses": [
-    {{"id": "H1", "statement": "가설 내용", "confidence": "HIGH/MEDIUM/LOW", "evidence": "근거 요약"}},
-    {{"id": "H2", "statement": "...", "confidence": "...", "evidence": "..."}},
-    {{"id": "H3", "statement": "...", "confidence": "...", "evidence": "..."}}
-  ],
-  "strategy_options": [
-    {{
-      "id": "S1",
-      "name": "전략명",
-      "description": "전략 설명 (200자 이상)",
-      "pros": ["장점1", "장점2"],
-      "cons": ["단점1", "단점2"],
-      "required_resources": "필요 자원",
-      "timeline": "예상 소요 기간"
-    }},
-    {{"id": "S2", ...}},
-    {{"id": "S3", ...}}
-  ],
-  "recommended_strategy": {{
-    "selected_option": "S1",
-    "rationale": "선택 이유 (200자 이상)",
-    "execution_plan": [
-      {{"week": 1, "focus": "집중 영역", "actions": ["액션1", "액션2"], "deliverables": ["산출물1"]}},
-      {{"week": 2, ...}}
-    ]
-  }},
-  "kpis": [
-    {{"metric": "지표명", "current": "현재값", "target": "목표값", "measurement": "측정 방법", "frequency": "측정 주기"}}
-  ],
-  "risks": [
-    {{"risk": "리스크 내용", "probability": "HIGH/MEDIUM/LOW", "impact": "HIGH/MEDIUM/LOW", "mitigation": "방어 전략", "early_warning": "조기 경보 신호"}}
-  ],
-  "evidence": {{
-    "rulecard_ids": ["사용된 RuleCard ID 목록"],
-    "evidence_summary": "근거 요약 (100자 이상)"
-  }},
-  "body_markdown": "## {spec.title}\\n\\n(위 내용을 통합한 마크다운 본문, {spec.min_chars}자 이상)",
-  "confidence": "HIGH/MEDIUM/LOW"
-}}
-"""
-    return base
+## 이 섹션: {spec.title}
+JSON 스키마에 맞춰 정확히 응답하세요."""
 
 
-def get_premium_user_prompt(
+def get_section_user_prompt(
     section_id: str,
     saju_data: Dict[str, Any],
-    rulecards_context: str,
+    allocation: SectionRuleCardAllocation,
     target_year: int,
     user_question: str = ""
 ) -> str:
-    """섹션별 유저 프롬프트 생성"""
-    
     spec = PREMIUM_SECTIONS.get(section_id)
-    
-    saju = saju_data.get("saju", saju_data)
     day_master = saju_data.get("day_master", "")
     day_master_element = saju_data.get("day_master_element", "")
     
-    return f"""## 클라이언트 비즈니스 프로파일
-
-### 의사결정자 특성 분석 데이터
+    return f"""## 클라이언트 프로파일
 - 핵심 역량 코드: {day_master} ({day_master_element})
 - 분석 기준년도: {target_year}년
+- 질문: {user_question or "종합적인 비즈니스 전략 수립"}
 
-### 클라이언트 질문/관심사
-{user_question or "종합적인 비즈니스 전략 수립"}
-
-## 분석 근거 데이터 (RuleCard)
-{rulecards_context}
+## 분석 근거 RuleCards ({allocation.allocated_count}장)
+{allocation.context_text}
 
 ---
-
-위 데이터를 기반으로 **{spec.title if spec else section_id}** 섹션을 작성해주세요.
-
-중요 체크리스트:
-✅ 명리학/사주 용어 사용 금지 (비즈니스 용어만 사용)
-✅ 최소 {spec.min_chars if spec else 3000}자 이상 작성
-✅ 구체적 숫자, 날짜, 담당 포함
-✅ 실행 가능한 액션 아이템
-✅ 측정 가능한 KPI
-
-반드시 JSON 형식으로만 응답하세요. 마크다운 코드블록 없이 순수 JSON만 출력하세요.
-"""
+위 데이터를 기반으로 **{spec.title if spec else section_id}** 섹션을 작성하세요.
+- 최소 {spec.min_chars if spec else 2000}자 이상
+- 명리학 용어 금지, 비즈니스 용어만 사용
+- JSON 스키마에 정확히 맞춰 응답"""
 
 
-# ============ 룰카드 분배 ============
-
-def distribute_rulecards_premium(
-    all_cards: List[Dict[str, Any]],
-    section_id: str,
-    max_cards: int = 60
-) -> Tuple[str, List[str]]:
-    """섹션 주제에 맞게 RuleCards 분배"""
-    spec = PREMIUM_SECTIONS.get(section_id)
-    if not spec:
-        return "", []
-    
-    target_topics = spec.topics
-    quota = min(spec.rulecard_quota, max_cards)
-    
-    scored_cards = []
-    for card in all_cards:
-        card_topic = card.get("topic", "").lower()
-        card_tags = [t.lower() for t in card.get("tags", [])]
-        
-        score = 0
-        for topic in target_topics:
-            if topic.lower() in card_topic:
-                score += 3
-            if any(topic.lower() in tag for tag in card_tags):
-                score += 2
-        
-        if score > 0:
-            scored_cards.append((score, card))
-    
-    scored_cards.sort(key=lambda x: x[0], reverse=True)
-    selected = [card for _, card in scored_cards[:quota]]
-    
-    if len(selected) < quota:
-        used_ids = {c.get("id", "") for c in selected}
-        for card in all_cards:
-            if card.get("id", "") not in used_ids:
-                selected.append(card)
-                if len(selected) >= quota:
-                    break
-    
-    context_lines = []
-    card_ids = []
-    
-    for card in selected:
-        card_id = card.get("id", card.get("_id", f"card_{len(card_ids)}"))
-        card_ids.append(card_id)
-        
-        topic = card.get("topic", "")
-        mechanism = sanitize_for_business(card.get("mechanism", "")[:150])
-        action = sanitize_for_business(card.get("action", "")[:150])
-        
-        line = f"[{card_id}] 분석 영역: {topic}"
-        if mechanism:
-            line += f"\n  → 비즈니스 시사점: {mechanism}"
-        if action:
-            line += f"\n  → 권장 액션: {action}"
-        
-        context_lines.append(line)
-    
-    context_str = "\n".join(context_lines) if context_lines else "분석 데이터 없음"
-    
-    return context_str, card_ids
-
-
-# ============ 섹션별 Validation ============
-
-@dataclass
-class ValidationResult:
-    is_valid: bool
-    char_count: int
-    missing_elements: List[str]
-    forbidden_terms_found: List[str]
-    needs_expansion: bool
-    details: str = ""
-
-
-def validate_sprint_section(content: Dict[str, Any]) -> ValidationResult:
-    """Sprint 섹션 전용 검증 (간소화)"""
-    missing = []
-    
-    body_md = content.get("body_markdown", "")
-    char_count = len(body_md)
-    
-    # 미션 선언문
-    if not content.get("mission_statement"):
-        missing.append("미션 선언문")
-    
-    # 주간 계획 (최소 4주)
-    weekly = content.get("weekly_plans", [])
-    if len(weekly) < 4:
-        missing.append(f"주간 계획 ({len(weekly)}/4주 이상)")
-    
-    # 마일스톤
-    milestones = content.get("milestones", {})
-    if not milestones.get("day_30") and not milestones.get("day_60") and not milestones.get("day_90"):
-        missing.append("30/60/90일 마일스톤")
-    
-    # 금칙어 체크
-    is_clean, forbidden = validate_no_forbidden_terms(body_md)
-    
-    # Sprint는 분량 기준 완화 (2000자 이상이면 OK)
-    min_chars = 2000
-    is_valid = char_count >= min_chars and len(missing) == 0
-    needs_expansion = char_count < min_chars or len(missing) > 0
-    
-    return ValidationResult(
-        is_valid=is_valid,
-        char_count=char_count,
-        missing_elements=missing,
-        forbidden_terms_found=forbidden,
-        needs_expansion=needs_expansion,
-        details=f"Sprint validation: chars={char_count}, weekly={len(weekly)}"
-    )
-
-
-def validate_calendar_section(content: Dict[str, Any]) -> ValidationResult:
-    """Calendar 섹션 전용 검증 (간소화)"""
-    missing = []
-    
-    body_md = content.get("body_markdown", "")
-    char_count = len(body_md)
-    
-    # 연간 테마
-    if not content.get("annual_theme"):
-        missing.append("연간 테마")
-    
-    # 월별 계획 (최소 6개월)
-    monthly = content.get("monthly_plans", [])
-    if len(monthly) < 6:
-        missing.append(f"월별 계획 ({len(monthly)}/6개월 이상)")
-    
-    # 금칙어 체크
-    is_clean, forbidden = validate_no_forbidden_terms(body_md)
-    
-    min_chars = 2500
-    is_valid = char_count >= min_chars and len(missing) == 0
-    needs_expansion = char_count < min_chars or len(missing) > 0
-    
-    return ValidationResult(
-        is_valid=is_valid,
-        char_count=char_count,
-        missing_elements=missing,
-        forbidden_terms_found=forbidden,
-        needs_expansion=needs_expansion,
-        details=f"Calendar validation: chars={char_count}, monthly={len(monthly)}"
-    )
-
-
-def validate_standard_section(content: Dict[str, Any], section_id: str) -> ValidationResult:
-    """표준 섹션 검증"""
-    spec = PREMIUM_SECTIONS.get(section_id)
-    if not spec:
-        return ValidationResult(True, 0, [], [], False)
-    
-    body_md = content.get("body_markdown", "")
-    char_count = len(body_md)
-    
-    missing = []
-    
-    if not content.get("diagnosis", {}).get("current_state"):
-        missing.append("현상 진단")
-    
-    hypotheses = content.get("hypotheses", [])
-    if len(hypotheses) < 2:
-        missing.append(f"핵심 가설 ({len(hypotheses)}/2개 이상)")
-    
-    options = content.get("strategy_options", [])
-    if len(options) < 2:
-        missing.append(f"전략 옵션 ({len(options)}/2개 이상)")
-    
-    kpis = content.get("kpis", [])
-    if len(kpis) < 2:
-        missing.append(f"KPI ({len(kpis)}/2개 이상)")
-    
-    is_clean, forbidden = validate_no_forbidden_terms(body_md)
-    
-    # 분량 기준 완화 (원래의 70%)
-    min_chars = int(spec.min_chars * 0.7)
-    is_valid = char_count >= min_chars and len(missing) == 0
-    needs_expansion = char_count < min_chars or len(missing) > 0
-    
-    return ValidationResult(
-        is_valid=is_valid,
-        char_count=char_count,
-        missing_elements=missing,
-        forbidden_terms_found=forbidden,
-        needs_expansion=needs_expansion,
-        details=f"Standard validation: chars={char_count}/{min_chars}"
-    )
-
-
-def validate_section_output(content: Dict[str, Any], section_id: str) -> ValidationResult:
-    """섹션 타입에 따른 검증 분기"""
-    spec = PREMIUM_SECTIONS.get(section_id)
-    if not spec:
-        return ValidationResult(True, 0, [], [], False, "No spec found")
-    
-    if spec.validation_type == "sprint":
-        return validate_sprint_section(content)
-    elif spec.validation_type == "calendar":
-        return validate_calendar_section(content)
-    else:
-        return validate_standard_section(content, section_id)
-
-
-# ============ Polish Pass ============
-
-def polish_section(content: Dict[str, Any], section_id: str) -> Dict[str, Any]:
-    """섹션 후처리: 문체 통일, 금칙어 제거"""
-    
-    if "body_markdown" in content:
-        content["body_markdown"] = sanitize_for_business(content["body_markdown"])
-    
-    if "diagnosis" in content and isinstance(content["diagnosis"], dict):
-        if "current_state" in content["diagnosis"]:
-            content["diagnosis"]["current_state"] = sanitize_for_business(
-                content["diagnosis"]["current_state"]
-            )
-    
-    if "hypotheses" in content:
-        for h in content["hypotheses"]:
-            if isinstance(h, dict):
-                h["statement"] = sanitize_for_business(h.get("statement", ""))
-                h["evidence"] = sanitize_for_business(h.get("evidence", ""))
-    
-    if "strategy_options" in content:
-        for s in content["strategy_options"]:
-            if isinstance(s, dict):
-                s["description"] = sanitize_for_business(s.get("description", ""))
-    
-    if "recommended_strategy" in content and isinstance(content["recommended_strategy"], dict):
-        content["recommended_strategy"]["rationale"] = sanitize_for_business(
-            content["recommended_strategy"].get("rationale", "")
-        )
-    
-    if "risks" in content:
-        for r in content["risks"]:
-            if isinstance(r, dict):
-                r["risk"] = sanitize_for_business(r.get("risk", ""))
-                r["mitigation"] = sanitize_for_business(r.get("mitigation", ""))
-    
-    # Sprint 전용 필드
-    if "mission_statement" in content:
-        content["mission_statement"] = sanitize_for_business(content["mission_statement"])
-    
-    if "weekly_plans" in content:
-        for wp in content["weekly_plans"]:
-            if isinstance(wp, dict) and "theme" in wp:
-                wp["theme"] = sanitize_for_business(wp["theme"])
-    
-    # Calendar 전용 필드
-    if "annual_theme" in content:
-        content["annual_theme"] = sanitize_for_business(content["annual_theme"])
-    
-    return content
-
-
-# ============ 메인 빌더 ============
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 7. 메인 빌더
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class PremiumReportBuilder:
-    """99,000원 프리미엄 리포트 빌더 v3"""
+    """99,000원 프리미엄 리포트 빌더 v5"""
     
     def __init__(self):
         self._client = None
@@ -658,175 +575,177 @@ class PremiumReportBuilder:
         api_key = get_openai_api_key()
         return AsyncOpenAI(
             api_key=api_key,
-            timeout=httpx.Timeout(float(settings.report_section_timeout), connect=15.0),
-            max_retries=0  # 수동 retry 구현
+            timeout=httpx.Timeout(90.0, connect=15.0),
+            max_retries=0
         )
     
-    async def _call_openai_with_retry(
+    async def _call_with_retry(
         self,
         messages: List[Dict[str, str]],
         section_id: str,
+        response_format: dict,
         max_retries: int = 3,
         base_delay: float = 2.0
-    ) -> str:
-        """
-        OpenAI 호출 + Exponential Backoff Retry
-        429 (Rate Limit), 5xx (Server Error) 시 재시도
-        """
+    ) -> Dict[str, Any]:
+        """JSON Schema 강제 + Retry + Exponential Backoff + Jitter"""
         settings = get_settings()
         last_error = None
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"[Section:{section_id}] OpenAI 호출 시도 {attempt + 1}/{max_retries}")
+                logger.info(f"[Section:{section_id}] OpenAI 호출 {attempt + 1}/{max_retries}")
                 
                 response = await self._client.chat.completions.create(
                     model=settings.openai_model,
                     messages=messages,
-                    max_tokens=settings.report_section_max_output_tokens,
+                    max_tokens=4000,
                     temperature=0.3,
-                    response_format={"type": "json_object"}
+                    response_format=response_format
                 )
                 
-                content = response.choices[0].message.content
-                logger.info(f"[Section:{section_id}] OpenAI 호출 성공 | 응답 길이: {len(content or '')}자")
+                content_str = response.choices[0].message.content
+                if not content_str:
+                    raise ValueError("빈 응답")
+                
+                content = json.loads(content_str)
+                logger.info(f"[Section:{section_id}] 성공 | 응답: {len(content_str)}자")
                 return content
                 
             except RateLimitError as e:
                 last_error = e
-                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(
-                    f"[Section:{section_id}] 429 Rate Limit | "
-                    f"Attempt {attempt + 1}/{max_retries} | "
-                    f"Retry after {delay:.1f}s | Error: {str(e)[:100]}"
-                )
+                delay = base_delay * (2 ** attempt) + random.uniform(0.5, 1.5)
+                logger.warning(f"[Section:{section_id}] 429 Rate Limit | Wait {delay:.1f}s")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(delay)
                     
             except (APIError, APIConnectionError, APITimeoutError) as e:
                 last_error = e
-                status = getattr(e, 'status_code', 'N/A')
-                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(
-                    f"[Section:{section_id}] API Error (status={status}) | "
-                    f"Attempt {attempt + 1}/{max_retries} | "
-                    f"Retry after {delay:.1f}s | Error: {str(e)[:100]}"
-                )
+                delay = base_delay * (2 ** attempt) + random.uniform(0.5, 1.5)
+                logger.warning(f"[Section:{section_id}] API Error | Wait {delay:.1f}s | {str(e)[:100]}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(delay)
+                    
+            except json.JSONDecodeError as e:
+                last_error = e
+                delay = base_delay * (2 ** attempt) + random.uniform(0.5, 1.5)
+                logger.warning(f"[Section:{section_id}] JSON Parse Error | Wait {delay:.1f}s")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(delay)
                     
             except Exception as e:
                 last_error = e
-                logger.error(
-                    f"[Section:{section_id}] 예상치 못한 에러 | "
-                    f"Type: {type(e).__name__} | Error: {str(e)[:200]}"
-                )
-                # 예상치 못한 에러는 즉시 raise
+                logger.error(f"[Section:{section_id}] 예상치 못한 에러: {type(e).__name__}: {str(e)[:200]}")
                 raise
         
-        # 모든 재시도 실패
         raise last_error or Exception("Unknown error after retries")
     
     async def build_premium_report(
         self,
         saju_data: Dict[str, Any],
         rulecards: List[Dict[str, Any]],
+        feature_tags: List[str] = None,
         target_year: int = 2026,
         user_question: str = "",
         name: str = "고객",
         mode: str = "premium"
     ) -> Dict[str, Any]:
-        """7개 섹션 순차 생성 + 합성 + Polish (안정성 우선)"""
+        """7개 섹션 순차 생성 (Semaphore=1, 안정성 최우선)"""
         settings = get_settings()
         start_time = time.time()
         
-        # 동시성 1로 제한 (안정성 우선)
-        concurrency = settings.report_max_concurrency
-        self._semaphore = asyncio.Semaphore(concurrency)
+        # Semaphore: 1 (완전 순차 처리로 안정성 확보)
+        self._semaphore = asyncio.Semaphore(1)
         self._client = self._get_client()
+        
+        if not feature_tags:
+            feature_tags = []
+        
+        # ═══════════════════════════════════════════════════
+        # 🔥 핵심: 전역 Top-100 RuleCards 먼저 선별
+        # ═══════════════════════════════════════════════════
+        global_selection = select_global_top100(rulecards, feature_tags, top_limit=100)
         
         logger.info(
             f"[PremiumReport] ========== 시작 ==========\n"
-            f"  Year={target_year} | Cards={len(rulecards)} | Mode={mode} | Concurrency={concurrency}"
+            f"  Year={target_year} | Original Pool={global_selection.original_pool_count}\n"
+            f"  🔥 Top-100 선별={global_selection.top100_count} | FeatureTags={len(feature_tags)}"
         )
         
+        # 섹션별 RuleCard 분배 (Top-100에서만)
         section_ids = list(PREMIUM_SECTIONS.keys())
+        allocations: Dict[str, SectionRuleCardAllocation] = {}
+        used_card_ids = set()
+        
+        for sid in section_ids:
+            spec = PREMIUM_SECTIONS[sid]
+            alloc = allocate_rulecards_to_section(
+                top100_cards=global_selection.top100_cards,
+                section_id=sid,
+                max_cards=spec.max_cards,
+                already_used_ids=used_card_ids
+            )
+            allocations[sid] = alloc
+            used_card_ids.update(alloc.allocated_card_ids)
+            
+            logger.info(f"[Allocation] {sid}: {alloc.allocated_count}장 할당")
+        
+        # 섹션 생성 태스크
         tasks = [
-            self._generate_section_with_expansion(
+            self._generate_section(
                 section_id=sid,
                 saju_data=saju_data,
-                rulecards=rulecards,
+                allocation=allocations[sid],
                 target_year=target_year,
                 user_question=user_question
             )
             for sid in section_ids
         ]
         
-        # 병렬 실행 (semaphore로 동시성 제한)
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 결과 수집 + 상세 에러 로깅
+        # 결과 수집
         sections = []
-        total_rulecards = 0
         errors = []
+        rulecard_meta = {}
+        total_allocated = 0
         
         for sid, result in zip(section_ids, results):
+            alloc = allocations[sid]
+            
             if isinstance(result, Exception):
                 error_detail = {
                     "section": sid,
                     "error_type": type(result).__name__,
-                    "error_message": str(result)[:500],
-                    "traceback": traceback.format_exc()[:1000]
+                    "error_message": str(result)[:500]
                 }
                 errors.append(error_detail)
-                
-                logger.error(
-                    f"[PremiumReport] ❌ 섹션 실패: {sid}\n"
-                    f"  Error Type: {type(result).__name__}\n"
-                    f"  Error: {str(result)[:300]}\n"
-                    f"  Traceback: {traceback.format_exc()[:500]}"
-                )
-                
+                logger.error(f"[PremiumReport] ❌ 섹션 실패: {sid} | {type(result).__name__}: {str(result)[:200]}")
                 sections.append(self._create_error_section(sid, target_year, str(result)[:200]))
             else:
-                polished = polish_section(result["content"], sid)
-                
+                content = result["content"]
+                polished = self._polish_section(content, sid)
                 spec = PREMIUM_SECTIONS.get(sid)
                 
-                # Sprint/Calendar 전용 필드 처리
                 section_data = {
                     "id": sid,
                     "title": spec.title if spec else sid,
                     "confidence": polished.get("confidence", "MEDIUM"),
-                    "rulecard_ids": result.get("rulecard_ids", []),
+                    "rulecard_ids": alloc.allocated_card_ids,
+                    "rulecard_selected": alloc.allocated_count,
                     "body_markdown": polished.get("body_markdown", ""),
-                    "char_count": result.get("char_count", 0),
+                    "char_count": len(polished.get("body_markdown", "")),
                     "latency_ms": result.get("latency_ms", 0)
                 }
                 
-                # 표준 섹션 필드
-                if spec and spec.validation_type == "standard":
-                    section_data.update({
-                        "diagnosis": polished.get("diagnosis", {}),
-                        "hypotheses": polished.get("hypotheses", []),
-                        "strategy_options": polished.get("strategy_options", []),
-                        "recommended_strategy": polished.get("recommended_strategy", {}),
-                        "kpis": polished.get("kpis", []),
-                        "risks": polished.get("risks", []),
-                        "evidence": polished.get("evidence", {}),
-                    })
-                
-                # Sprint 전용 필드
-                if spec and spec.validation_type == "sprint":
+                # 타입별 필드 추가
+                if spec.validation_type == "sprint":
                     section_data.update({
                         "mission_statement": polished.get("mission_statement", ""),
                         "weekly_plans": polished.get("weekly_plans", []),
                         "milestones": polished.get("milestones", {}),
                         "risk_scenarios": polished.get("risk_scenarios", []),
                     })
-                
-                # Calendar 전용 필드
-                if spec and spec.validation_type == "calendar":
+                elif spec.validation_type == "calendar":
                     section_data.update({
                         "annual_theme": polished.get("annual_theme", ""),
                         "monthly_plans": polished.get("monthly_plans", []),
@@ -834,11 +753,25 @@ class PremiumReportBuilder:
                         "peak_months": polished.get("peak_months", []),
                         "risk_months": polished.get("risk_months", []),
                     })
+                else:
+                    section_data.update({
+                        "diagnosis": polished.get("diagnosis", {}),
+                        "hypotheses": polished.get("hypotheses", []),
+                        "strategy_options": polished.get("strategy_options", []),
+                        "recommended_strategy": polished.get("recommended_strategy", {}),
+                        "kpis": polished.get("kpis", []),
+                        "risks": polished.get("risks", []),
+                    })
                 
                 sections.append(section_data)
-                total_rulecards += len(result.get("rulecard_ids", []))
-                
-                logger.info(f"[PremiumReport] ✅ 섹션 성공: {sid} | Chars={result.get('char_count', 0)}")
+                logger.info(f"[PremiumReport] ✅ 섹션 성공: {sid} | Chars={section_data['char_count']}")
+            
+            # 섹션별 룰카드 메타
+            rulecard_meta[sid] = {
+                "selected_count": alloc.allocated_count,
+                "selected_card_ids": alloc.allocated_card_ids
+            }
+            total_allocated += alloc.allocated_count
         
         total_latency = int((time.time() - start_time) * 1000)
         total_chars = sum(s.get("char_count", 0) for s in sections)
@@ -847,7 +780,6 @@ class PremiumReportBuilder:
             "target_year": target_year,
             "sections": sections,
             "meta": {
-                "total_tokens_estimate": int(total_chars / 2),
                 "total_chars": total_chars,
                 "mode": "premium_business_30p",
                 "generated_at": datetime.now().isoformat(),
@@ -855,9 +787,13 @@ class PremiumReportBuilder:
                 "section_count": len(sections),
                 "success_count": len(sections) - len(errors),
                 "error_count": len(errors),
-                "rulecards_used_total": total_rulecards,
                 "latency_ms": total_latency,
-                "concurrency": concurrency,
+                # 🔥 핵심: 룰카드 메타 (100/480 형식)
+                "rulecards_pool_total": global_selection.original_pool_count,
+                "rulecards_top100_selected": global_selection.top100_count,
+                "rulecards_used_total": total_allocated,
+                "rulecards_by_section": rulecard_meta,
+                "feature_tags_count": len(feature_tags),
                 "errors": errors if errors else None
             },
             "legacy": self._create_legacy_compat(sections, target_year, name)
@@ -866,54 +802,108 @@ class PremiumReportBuilder:
         logger.info(
             f"[PremiumReport] ========== 완료 ==========\n"
             f"  Sections={len(sections)} | Success={len(sections) - len(errors)} | Errors={len(errors)}\n"
+            f"  🔥 RuleCards={global_selection.top100_count}/{global_selection.original_pool_count} (Top-100)\n"
             f"  Chars={total_chars} | Latency={total_latency}ms"
         )
         
         return report
+    
+    async def _generate_section(
+        self,
+        section_id: str,
+        saju_data: Dict[str, Any],
+        allocation: SectionRuleCardAllocation,
+        target_year: int,
+        user_question: str
+    ) -> Dict[str, Any]:
+        """단일 섹션 생성"""
+        async with self._semaphore:
+            start_time = time.time()
+            
+            system_prompt = get_section_system_prompt(section_id, target_year)
+            user_prompt = get_section_user_prompt(
+                section_id, saju_data, allocation, target_year, user_question
+            )
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            response_format = get_section_schema(section_id)
+            
+            logger.info(f"[Section:{section_id}] 시작 | RuleCards={allocation.allocated_count}장")
+            
+            content = await self._call_with_retry(
+                messages=messages,
+                section_id=section_id,
+                response_format=response_format,
+                max_retries=3,
+                base_delay=2.0
+            )
+            
+            latency_ms = int((time.time() - start_time) * 1000)
+            
+            return {"content": content, "latency_ms": latency_ms}
     
     async def regenerate_single_section(
         self,
         section_id: str,
         saju_data: Dict[str, Any],
         rulecards: List[Dict[str, Any]],
+        feature_tags: List[str] = None,
         target_year: int = 2026,
         user_question: str = ""
     ) -> Dict[str, Any]:
-        """단일 섹션만 재생성 (Sprint 복구용)"""
-        
+        """단일 섹션만 재생성 (오류 복구용)"""
         if section_id not in PREMIUM_SECTIONS:
-            raise ValueError(f"Invalid section_id: {section_id}. Valid: {list(PREMIUM_SECTIONS.keys())}")
+            raise ValueError(f"Invalid section_id: {section_id}")
         
-        settings = get_settings()
         self._semaphore = asyncio.Semaphore(1)
         self._client = self._get_client()
         
-        logger.info(f"[SingleSection] 단독 재생성 시작: {section_id}")
+        if not feature_tags:
+            feature_tags = []
+        
+        # Top-100 선별
+        global_selection = select_global_top100(rulecards, feature_tags, top_limit=100)
+        
+        # 해당 섹션에 할당
+        spec = PREMIUM_SECTIONS[section_id]
+        allocation = allocate_rulecards_to_section(
+            top100_cards=global_selection.top100_cards,
+            section_id=section_id,
+            max_cards=spec.max_cards,
+            already_used_ids=set()
+        )
+        
+        logger.info(f"[SingleSection] 재생성 시작: {section_id} | RuleCards={allocation.allocated_count}")
         
         try:
-            result = await self._generate_section_with_expansion(
+            result = await self._generate_section(
                 section_id=section_id,
                 saju_data=saju_data,
-                rulecards=rulecards,
+                allocation=allocation,
                 target_year=target_year,
                 user_question=user_question
             )
             
-            polished = polish_section(result["content"], section_id)
-            spec = PREMIUM_SECTIONS[section_id]
+            content = result["content"]
+            polished = self._polish_section(content, section_id)
             
             section_data = {
                 "id": section_id,
                 "title": spec.title,
                 "confidence": polished.get("confidence", "MEDIUM"),
-                "rulecard_ids": result.get("rulecard_ids", []),
+                "rulecard_ids": allocation.allocated_card_ids,
+                "rulecard_selected": allocation.allocated_count,
                 "body_markdown": polished.get("body_markdown", ""),
-                "char_count": result.get("char_count", 0),
+                "char_count": len(polished.get("body_markdown", "")),
                 "latency_ms": result.get("latency_ms", 0),
                 "regenerated": True
             }
             
-            # 타입별 필드 추가
+            # 타입별 필드
             if spec.validation_type == "sprint":
                 section_data.update({
                     "mission_statement": polished.get("mission_statement", ""),
@@ -937,12 +927,9 @@ class PremiumReportBuilder:
                     "risks": polished.get("risks", []),
                 })
             
-            logger.info(f"[SingleSection] 완료: {section_id} | Chars={result.get('char_count', 0)}")
+            logger.info(f"[SingleSection] 완료: {section_id} | Chars={section_data['char_count']}")
             
-            return {
-                "success": True,
-                "section": section_data
-            }
+            return {"success": True, "section": section_data}
             
         except Exception as e:
             logger.error(f"[SingleSection] 실패: {section_id} | {str(e)[:200]}")
@@ -953,198 +940,50 @@ class PremiumReportBuilder:
                 "error_type": type(e).__name__
             }
     
-    async def _generate_section_with_expansion(
-        self,
-        section_id: str,
-        saju_data: Dict[str, Any],
-        rulecards: List[Dict[str, Any]],
-        target_year: int,
-        user_question: str,
-        max_expansions: int = 1  # 확장 1회로 제한 (안정성)
-    ) -> Dict[str, Any]:
-        """섹션 생성 + 자동 확장 루프"""
-        
-        async with self._semaphore:
-            start_time = time.time()
-            settings = get_settings()
-            
-            rulecards_context, rulecard_ids = distribute_rulecards_premium(
-                rulecards,
-                section_id,
-                settings.report_section_max_rulecards
-            )
-            
-            system_prompt = get_premium_system_prompt(section_id, target_year)
-            user_prompt = get_premium_user_prompt(
-                section_id, saju_data, rulecards_context, target_year, user_question
-            )
-            
-            logger.info(f"[Section:{section_id}] 생성 시작 | Cards={len(rulecard_ids)}")
-            
-            content = None
-            expansion_count = 0
-            last_validation = None
-            
-            while expansion_count <= max_expansions:
-                try:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ]
-                    
-                    # Retry 로직 포함된 OpenAI 호출
-                    content_str = await self._call_openai_with_retry(
-                        messages=messages,
-                        section_id=section_id,
-                        max_retries=3,
-                        base_delay=2.0
-                    )
-                    
-                    content = self._parse_json(content_str)
-                    
-                    if not content:
-                        raise ValueError(f"JSON 파싱 실패. 응답 길이: {len(content_str or '')}자")
-                    
-                    # 검증
-                    validation = validate_section_output(content, section_id)
-                    last_validation = validation
-                    
-                    logger.info(
-                        f"[Section:{section_id}] 검증 결과 | "
-                        f"Valid={validation.is_valid} | Chars={validation.char_count} | "
-                        f"Missing={validation.missing_elements} | {validation.details}"
-                    )
-                    
-                    if validation.is_valid:
-                        break
-                    
-                    if expansion_count >= max_expansions:
-                        logger.warning(f"[Section:{section_id}] 최대 확장 도달, 현재 결과 사용")
-                        break
-                    
-                    expansion_count += 1
-                    
-                except Exception as e:
-                    logger.error(
-                        f"[Section:{section_id}] 생성 에러 (attempt {expansion_count + 1}) | "
-                        f"Type: {type(e).__name__} | Error: {str(e)[:200]}"
-                    )
-                    if expansion_count >= max_expansions:
-                        raise
-                    expansion_count += 1
-            
-            latency_ms = int((time.time() - start_time) * 1000)
-            char_count = len(content.get("body_markdown", "")) if content else 0
-            
-            logger.info(
-                f"[Section:{section_id}] 완료 | "
-                f"Chars={char_count} | Latency={latency_ms}ms | Expansions={expansion_count}"
-            )
-            
-            return {
-                "content": content,
-                "rulecard_ids": rulecard_ids,
-                "char_count": char_count,
-                "latency_ms": latency_ms
-            }
+    def _polish_section(self, content: Dict[str, Any], section_id: str) -> Dict[str, Any]:
+        """용어 치환"""
+        if "body_markdown" in content:
+            content["body_markdown"] = sanitize_for_business(content["body_markdown"])
+        if "diagnosis" in content and isinstance(content["diagnosis"], dict):
+            if "current_state" in content["diagnosis"]:
+                content["diagnosis"]["current_state"] = sanitize_for_business(content["diagnosis"]["current_state"])
+        if "mission_statement" in content:
+            content["mission_statement"] = sanitize_for_business(content["mission_statement"])
+        if "annual_theme" in content:
+            content["annual_theme"] = sanitize_for_business(content["annual_theme"])
+        return content
     
     def _create_error_section(self, section_id: str, target_year: int, error_msg: str = "") -> Dict[str, Any]:
-        """에러 발생 시 폴백 섹션"""
         spec = PREMIUM_SECTIONS.get(section_id)
         return {
             "id": section_id,
             "title": spec.title if spec else section_id,
             "confidence": "LOW",
             "rulecard_ids": [],
+            "rulecard_selected": 0,
             "body_markdown": f"## {spec.title if spec else section_id}\n\n"
-                           f"{target_year}년 분석 데이터 처리 중 일시적 오류가 발생했습니다.\n"
-                           f"잠시 후 다시 시도해주세요.\n\n"
-                           f"_Error: {error_msg[:100]}_" if error_msg else "",
-            "diagnosis": {"current_state": "데이터 처리 오류", "key_issues": []},
-            "hypotheses": [],
-            "strategy_options": [],
-            "recommended_strategy": {},
-            "kpis": [],
-            "risks": [],
-            "evidence": {"rulecard_ids": [], "evidence_summary": ""},
+                           f"{target_year}년 분석 중 오류가 발생했습니다.\n"
+                           f"_Error: {error_msg[:100]}_",
             "char_count": 0,
             "latency_ms": 0,
             "error": True,
             "error_message": error_msg[:200]
         }
     
-    def _parse_json(self, content: str) -> Optional[Dict[str, Any]]:
-        """JSON 파싱 (강화)"""
-        if not content:
-            return None
-        
-        text = content.strip()
-        
-        # 코드블록 제거
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = lines[1:] if lines[0].startswith("```") else lines
-            lines = lines[:-1] if lines and lines[-1].strip().startswith("```") else lines
-            text = "\n".join(lines)
-        
-        # 직접 파싱
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        
-        # JSON 부분 추출
-        match = re.search(r'\{[\s\S]*\}', text)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        
-        logger.warning(f"JSON 파싱 실패. 원문 앞 500자: {text[:500]}")
-        return None
-    
-    def _create_legacy_compat(
-        self,
-        sections: List[Dict[str, Any]],
-        target_year: int,
-        name: str
-    ) -> Dict[str, Any]:
-        """레거시 프론트엔드 호환용 필드"""
-        
+    def _create_legacy_compat(self, sections: List[Dict[str, Any]], target_year: int, name: str) -> Dict[str, Any]:
         exec_section = next((s for s in sections if s["id"] == "exec"), {})
-        
-        strengths = []
-        for h in exec_section.get("hypotheses", []):
-            if h.get("confidence") == "HIGH":
-                strengths.append(h.get("statement", ""))
-        
-        risks = []
-        for r in exec_section.get("risks", [])[:3]:
-            risks.append(r.get("risk", ""))
-        
-        action_plan = []
-        rec = exec_section.get("recommended_strategy", {})
-        for step in rec.get("execution_plan", [])[:5]:
-            if step.get("actions"):
-                action_plan.extend(step["actions"][:2])
-        
+        strengths = [h.get("statement", "") for h in exec_section.get("hypotheses", []) if h.get("confidence") == "HIGH"][:5]
+        risks = [r.get("risk", "") for r in exec_section.get("risks", [])[:3]]
         return {
             "success": True,
             "summary": f"{target_year}년 프리미엄 비즈니스 컨설팅 보고서",
-            "day_master_analysis": exec_section.get("diagnosis", {}).get("current_state", ""),
-            "strengths": strengths[:5],
+            "strengths": strengths,
             "risks": risks,
-            "answer": exec_section.get("body_markdown", "")[:1000],
-            "action_plan": action_plan[:5],
-            "lucky_periods": [],
-            "caution_periods": [],
-            "lucky_elements": {},
             "blessing": f"{name}님의 {target_year}년 성공을 응원합니다!",
             "disclaimer": "본 보고서는 데이터 기반 분석 참고 자료이며, 전문적 조언을 대체하지 않습니다."
         }
 
 
-# 싱글톤 인스턴스
+# 싱글톤
 premium_report_builder = PremiumReportBuilder()
 report_builder = premium_report_builder
