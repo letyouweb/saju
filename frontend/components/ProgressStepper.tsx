@@ -328,14 +328,14 @@ export default function ProgressStepper({ reportId, onComplete, onError }: Progr
       </div>
 
       {/* 푸터: 안내 메시지 */}
-      <div className="bg-slate-50 border-t border-slate-200 p-4">
-        <div className="flex items-start gap-3 text-sm text-slate-600">
-          <span className="text-lg">💡</span>
+      <div className="bg-amber-50 border-t border-amber-200 p-4">
+        <div className="flex items-start gap-3 text-sm text-amber-800">
+          <span className="text-lg">⚠️</span>
           <div>
-            <p className="font-medium">서버에서 생성 중입니다</p>
-            <p className="text-slate-500 mt-1">
-              창을 닫아도 백그라운드에서 계속 진행됩니다.
-              <br />완료되면 <strong>이메일로 결과 링크</strong>를 보내드려요.
+            <p className="font-medium">생성 중에는 창을 유지해주세요</p>
+            <p className="text-amber-700 mt-1">
+              안정적인 생성을 위해 완료될 때까지 이 페이지를 열어두세요.
+              <br />완료되면 <strong>이메일로 결과 링크</strong>도 보내드립니다.
             </p>
           </div>
         </div>

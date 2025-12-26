@@ -341,6 +341,27 @@ class SupabaseStore:
             "status": "pending",
             "error": None,
         }).eq("report_id", report_id).eq("section_id", section_id).execute()
+    
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🔥 Job Recovery용 메서드
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    async def get_reports_by_status(self, status: str) -> list:
+        """특정 상태의 리포트 목록 조회 (복구용)"""
+        try:
+            client = self._get_client()
+            result = (
+                client.table("reports")
+                .select("id, email, status, created_at, updated_at")
+                .eq("status", status)
+                .order("created_at", desc=True)
+                .limit(50)  # 최대 50개만
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"[SupabaseStore] get_reports_by_status 실패: {e}")
+            return []
 
 
 # 싱글톤 인스턴스

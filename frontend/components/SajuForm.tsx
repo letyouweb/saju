@@ -142,7 +142,7 @@ export default function SajuForm({ onSubmit }: SajuFormProps) {
           <p className="text-red-500 text-sm mt-1">{emailError}</p>
         )}
         <p className="text-xs text-gray-500 mt-1">
-          💡 창을 닫아도 백그라운드에서 생성이 계속됩니다. 완료되면 이메일로 알려드려요.
+          ⚠️ 생성 중에는 창을 유지해주세요. 완료되면 이메일로 결과 링크를 보내드립니다.
         </p>
       </div>
 
