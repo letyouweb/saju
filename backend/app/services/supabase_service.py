@@ -1,5 +1,6 @@
 """
-Supabase Service - Lazy Init (v5)
+Supabase Service - Lazy Init (v6)
+테이블: report_jobs, report_sections
 """
 import os
 import logging
@@ -23,6 +24,10 @@ SECTION_SPECS = [
 class SupabaseService:
     _client = None
     
+    # 🔥 테이블 이름 (실제 Supabase 스키마에 맞춤)
+    TABLE_JOBS = "report_jobs"
+    TABLE_SECTIONS = "report_sections"
+    
     def _get_client(self):
         if self._client is None:
             from supabase import create_client
@@ -39,68 +44,86 @@ class SupabaseService:
     
     async def create_job(self, email: str, name: str, input_data: Dict, target_year: int = 2026) -> Dict:
         client = self._get_client()
-        result = client.table("reports").insert({
-            "email": email, "name": name or "고객",
-            "input_data": input_data, "target_year": target_year,
-            "status": "queued", "progress": 0, "current_step": "queued"
+        result = client.table(self.TABLE_JOBS).insert({
+            "user_email": email,
+            "input_json": input_data,
+            "status": "queued",
+            "progress": 0,
+            "step": "queued"
         }).execute()
         if not result.data:
             raise RuntimeError("Job 생성 실패")
-        return result.data[0]
+        job = result.data[0]
+        logger.info(f"[Supabase] Job 생성: {job['id']}")
+        return job
     
     async def get_job(self, job_id: str) -> Optional[Dict]:
         client = self._get_client()
-        result = client.table("reports").select("*").eq("id", job_id).execute()
+        result = client.table(self.TABLE_JOBS).select("*").eq("id", job_id).execute()
         return result.data[0] if result.data else None
     
     async def get_job_by_token(self, token: str) -> Optional[Dict]:
         client = self._get_client()
-        result = client.table("reports").select("*").eq("access_token", token).execute()
+        result = client.table(self.TABLE_JOBS).select("*").eq("public_token", token).execute()
         return result.data[0] if result.data else None
     
-    async def update_progress(self, job_id: str, progress: int, step: str, status: str = "generating"):
+    async def update_progress(self, job_id: str, progress: int, step: str, status: str = "running"):
         client = self._get_client()
-        client.table("reports").update({
-            "status": status, "progress": progress, "current_step": step
+        client.table(self.TABLE_JOBS).update({
+            "status": status,
+            "progress": progress,
+            "step": step
         }).eq("id", job_id).execute()
     
     async def complete_job(self, job_id: str, result_json: Dict, markdown: str = "", gen_ms: int = 0):
         client = self._get_client()
+        update_data = {
+            "status": "completed",
+            "progress": 100,
+            "step": "completed",
+            "result_json": result_json
+        }
         if markdown:
-            result_json["markdown"] = markdown
-        client.table("reports").update({
-            "status": "completed", "progress": 100, "current_step": "completed",
-            "result_json": result_json, "completed_at": datetime.utcnow().isoformat(),
-            "generation_time_ms": gen_ms
-        }).eq("id", job_id).execute()
+            update_data["markdown"] = markdown
+        client.table(self.TABLE_JOBS).update(update_data).eq("id", job_id).execute()
+        logger.info(f"[Supabase] ✅ Job 완료: {job_id}")
     
     async def fail_job(self, job_id: str, error: str):
         client = self._get_client()
-        client.table("reports").update({
-            "status": "failed", "error": error[:500]
+        client.table(self.TABLE_JOBS).update({
+            "status": "failed",
+            "error": error[:500]
         }).eq("id", job_id).execute()
+        logger.error(f"[Supabase] ❌ Job 실패: {job_id}")
     
     async def save_section(self, job_id: str, section_id: str, section_title: str,
                           section_order: int, content_json: Dict, char_count: int = 0, elapsed_ms: int = 0):
         client = self._get_client()
+        
+        # 기존 섹션 확인
+        existing = client.table(self.TABLE_SECTIONS).select("id").eq(
+            "job_id", job_id).eq("section_id", section_id).execute()
+        
         data = {
-            "report_id": job_id, "section_id": section_id, "section_title": section_title,
-            "section_order": section_order, "status": "completed", "content_json": content_json,
-            "char_count": char_count, "elapsed_ms": elapsed_ms,
-            "completed_at": datetime.utcnow().isoformat()
+            "job_id": job_id,
+            "section_id": section_id,
+            "status": "completed",
+            "progress": 100,
+            "markdown": str(content_json.get("summary", "")),
+            "raw_json": content_json
         }
-        existing = client.table("report_sections").select("id").eq(
-            "report_id", job_id).eq("section_id", section_id).execute()
+        
         if existing.data:
-            client.table("report_sections").update(data).eq(
-                "report_id", job_id).eq("section_id", section_id).execute()
+            client.table(self.TABLE_SECTIONS).update(data).eq(
+                "job_id", job_id).eq("section_id", section_id).execute()
         else:
-            client.table("report_sections").insert(data).execute()
+            client.table(self.TABLE_SECTIONS).insert(data).execute()
+        
+        logger.info(f"[Supabase] 섹션 저장: {section_id}")
     
     async def get_sections(self, job_id: str) -> List[Dict]:
         client = self._get_client()
-        result = client.table("report_sections").select("*").eq(
-            "report_id", job_id).order("section_order").execute()
+        result = client.table(self.TABLE_SECTIONS).select("*").eq("job_id", job_id).execute()
         return result.data or []
     
     async def get_job_with_sections(self, job_id: str) -> Optional[Dict]:
@@ -112,13 +135,14 @@ class SupabaseService:
     async def init_sections(self, job_id: str, specs: List[Dict]):
         client = self._get_client()
         for spec in specs:
-            existing = client.table("report_sections").select("id").eq(
-                "report_id", job_id).eq("section_id", spec["id"]).execute()
+            existing = client.table(self.TABLE_SECTIONS).select("id").eq(
+                "job_id", job_id).eq("section_id", spec["id"]).execute()
             if not existing.data:
-                client.table("report_sections").insert({
-                    "report_id": job_id, "section_id": spec["id"],
-                    "section_title": spec["title"], "section_order": spec["order"],
-                    "status": "pending"
+                client.table(self.TABLE_SECTIONS).insert({
+                    "job_id": job_id,
+                    "section_id": spec["id"],
+                    "status": "pending",
+                    "progress": 0
                 }).execute()
     
     async def update_section_status(self, job_id: str, section_id: str, status: str, error: str = None):
@@ -126,13 +150,13 @@ class SupabaseService:
         data = {"status": status}
         if error:
             data["error"] = error[:500]
-        client.table("report_sections").update(data).eq(
-            "report_id", job_id).eq("section_id", section_id).execute()
+        client.table(self.TABLE_SECTIONS).update(data).eq(
+            "job_id", job_id).eq("section_id", section_id).execute()
     
     async def get_jobs_by_status(self, status: str, limit: int = 50) -> List[Dict]:
         try:
             client = self._get_client()
-            result = client.table("reports").select("id,email,status,created_at").eq(
+            result = client.table(self.TABLE_JOBS).select("id,user_email,status,created_at").eq(
                 "status", status).order("created_at", desc=True).limit(limit).execute()
             return result.data or []
         except:

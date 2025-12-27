@@ -1,19 +1,18 @@
 """
-Reports API Router v5 - Emergency Fix
+Reports API Router v6 - Supabase 테이블 이름 수정
+테이블: report_jobs, report_sections
 """
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Request/Response Models
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ReportStartRequest(BaseModel):
     email: EmailStr
     name: str = "고객"
@@ -28,11 +27,7 @@ class ReportStartRequest(BaseModel):
     survey_data: Optional[Dict[str, Any]] = None
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Supabase Lazy Import
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_supabase():
-    """Lazy import - 호출 시점에만 로드"""
     try:
         from app.services.supabase_service import supabase_service
         return supabase_service
@@ -52,9 +47,6 @@ SECTION_SPECS = [
 ]
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# API Endpoints
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @router.post("/start")
 async def start_report(
     payload: ReportStartRequest,
@@ -63,8 +55,10 @@ async def start_report(
 ):
     """리포트 생성 시작"""
     input_data = {
+        "name": payload.name,
         "question": payload.question,
         "concern_type": payload.concern_type,
+        "target_year": payload.target_year,
         "survey_data": payload.survey_data,
         "saju_result": payload.saju_result,
         "year_pillar": payload.year_pillar,
@@ -87,7 +81,6 @@ async def start_report(
             
             await supabase.init_sections(job_id, SECTION_SPECS)
             
-            # 백그라운드 작업
             rulestore = getattr(request.app.state, "rulestore", None)
             background_tasks.add_task(run_report_job, job_id, rulestore)
             
@@ -100,10 +93,8 @@ async def start_report(
             }
         except Exception as e:
             logger.error(f"Job 생성 실패: {e}")
-            raise HTTPException(status_code=500, detail=str(e)[:200])
+            raise HTTPException(status_code=500, detail=str(e)[:300])
     else:
-        # Supabase 없으면 임시 ID 반환
-        import uuid
         temp_id = str(uuid.uuid4())
         return {
             "success": True,
@@ -120,12 +111,7 @@ async def get_report_status(job_id: str):
     supabase = get_supabase()
     
     if not supabase or not supabase.is_available():
-        return {
-            "job_id": job_id,
-            "status": "unknown",
-            "progress": 0,
-            "message": "Supabase 미연결"
-        }
+        return {"job_id": job_id, "status": "unknown", "progress": 0, "message": "Supabase 미연결"}
     
     try:
         job = await supabase.get_job_with_sections(job_id)
@@ -135,21 +121,21 @@ async def get_report_status(job_id: str):
         
         return {
             "job_id": job_id,
-            "status": job["status"],
-            "progress": job["progress"],
-            "current_step": job.get("current_step", ""),
+            "status": job.get("status", "unknown"),
+            "progress": job.get("progress", 0),
+            "current_step": job.get("step", ""),
             "sections": [
-                {"id": s["section_id"], "status": s["status"]}
+                {"id": s.get("section_id"), "status": s.get("status")}
                 for s in job.get("sections", [])
             ],
             "error": job.get("error"),
-            "result": job.get("result_json") if job["status"] == "completed" else None
+            "result": job.get("result_json") if job.get("status") == "completed" else None
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"상태 조회 실패: {e}")
-        raise HTTPException(status_code=500, detail=str(e)[:100])
+        raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
 @router.get("/{job_id}/result")
@@ -165,15 +151,32 @@ async def get_report_result(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    if job["status"] != "completed":
-        return {"completed": False, "status": job["status"], "progress": job["progress"]}
+    if job.get("status") != "completed":
+        return {"completed": False, "status": job.get("status"), "progress": job.get("progress", 0)}
     
-    return {"completed": True, "result": job["result_json"]}
+    return {"completed": True, "result": job.get("result_json")}
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 백그라운드 작업
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+@router.get("/view/{token}")
+async def view_by_token(token: str):
+    """토큰으로 결과 조회 (이메일 링크용)"""
+    supabase = get_supabase()
+    
+    if not supabase or not supabase.is_available():
+        raise HTTPException(status_code=503, detail="Supabase 미연결")
+    
+    job = await supabase.get_job_by_token(token)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Invalid token")
+    
+    return {
+        "job_id": job["id"],
+        "status": job.get("status"),
+        "result": job.get("result_json") if job.get("status") == "completed" else None
+    }
+
+
 async def run_report_job(job_id: str, rulestore):
     """백그라운드 리포트 생성"""
     try:
