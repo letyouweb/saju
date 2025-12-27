@@ -244,8 +244,9 @@ export default function ResultCard({ calculateResult, interpretResult }: ResultC
 
     const monthColors = (month: number, energy: string) => {
       const monthName = `${month}월`;
-      if (peakMonths?.includes(monthName)) return 'bg-green-100 border-green-400 hover:bg-green-200';
-      if (riskMonths?.includes(monthName)) return 'bg-red-100 border-red-400 hover:bg-red-200';
+      // 🔥 P0: 안전한 includes 처리 (peakMonths/riskMonths가 배열이 아닐 수 있음)
+      if (Array.isArray(peakMonths) && peakMonths.includes(monthName)) return 'bg-green-100 border-green-400 hover:bg-green-200';
+      if (Array.isArray(riskMonths) && riskMonths.includes(monthName)) return 'bg-red-100 border-red-400 hover:bg-red-200';
       if (energy === 'HIGH') return 'bg-green-50 border-green-300 hover:bg-green-100';
       if (energy === 'LOW') return 'bg-orange-50 border-orange-300 hover:bg-orange-100';
       return 'bg-gray-50 border-gray-300 hover:bg-gray-100';

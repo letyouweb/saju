@@ -50,8 +50,8 @@ const getStatusText = (status: string): string => {
   return statusMap[status] || status;
 };
 
-// 🔥 프리미엄 진행 메시지 변환
-const getPremiumStepMessage = (step: string, sectionId?: string): string => {
+// 🔥 프리미엄 진행 메시지 변환 (안전한 includes 처리)
+const getPremiumStepMessage = (step: string | undefined | null, sectionId?: string): string => {
   // 섹션별 프리미엄 메시지
   const sectionMessages: Record<string, string> = {
     'exec': '🎯 경영진 요약 - 핵심 인사이트 도출 중...',
@@ -67,11 +67,12 @@ const getPremiumStepMessage = (step: string, sectionId?: string): string => {
     return sectionMessages[sectionId];
   }
   
-  // 기본 메시지 변환
-  if (step.includes('초기화')) return '🔮 8,543장 룰카드 중 최적 100장 선별 중...';
-  if (step.includes('RuleCards')) return '🔮 사주 데이터 기반 룰카드 매칭 중...';
+  // 🔥 P0: 안전한 includes 처리 (step이 string이 아닐 수 있음)
+  const stepStr = typeof step === 'string' ? step : '';
+  if (stepStr.includes('초기화')) return '🔮 8,543장 룰카드 중 최적 100장 선별 중...';
+  if (stepStr.includes('RuleCards')) return '🔮 사주 데이터 기반 룰카드 매칭 중...';
   
-  return step || '준비 중...';
+  return stepStr || '준비 중...';
 };
 
 const getStatusColor = (status: string): string => {

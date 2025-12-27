@@ -31,6 +31,15 @@ const SECTION_ICONS: Record<string, string> = {
   sprint: "🚀",
 };
 
+// 🔥 P0: 안전한 includes 헬퍼
+const safeIncludes = (arr: unknown, value: string): boolean => {
+  return Array.isArray(arr) && arr.includes(value);
+};
+
+const safeStringIncludes = (str: unknown, query: string): boolean => {
+  return typeof str === "string" && str.includes(query);
+};
+
 interface ReportClientProps {
   jobId: string;
   token: string;
@@ -45,14 +54,18 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
 
   const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? "사주OS";
 
+  // 🔥 P0: 토큰 검증
   useEffect(() => {
-    if (!jobId) {
-      setError("Invalid link (jobId missing)");
+    // jobId 검증
+    if (!jobId || typeof jobId !== "string" || jobId.length < 10) {
+      setError("유효하지 않은 리포트 ID입니다. 이메일 링크를 다시 확인해주세요.");
       setStatus("error");
       return;
     }
-    if (!token) {
-      setError("Invalid token (token missing). 이메일 링크를 다시 확인해주세요.");
+    
+    // token 검증
+    if (!token || typeof token !== "string" || token.length < 10) {
+      setError("유효하지 않은 토큰입니다. 이메일 링크를 다시 확인해주세요.");
       setStatus("error");
       return;
     }
@@ -78,32 +91,38 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
         console.log("[ReportView] Full API Response:", JSON.stringify({
           jobStatus: json?.job?.status,
           sectionCount: json?.sections?.length,
-          sectionIds: json?.sections?.map((s: any) => s.section_id || s.id),
+          sectionIds: Array.isArray(json?.sections) 
+            ? json.sections.map((s: any) => s?.section_id || s?.id) 
+            : [],
           hasFullMarkdown: !!json?.full_markdown,
           fullMarkdownLength: json?.full_markdown?.length,
-          sectionsPreview: json?.sections?.map((s: any) => ({
-            id: s.section_id || s.id,
-            hasMarkdown: !!s.markdown,
-            markdownLength: s.markdown?.length || 0,
-            hasRawJson: !!s.raw_json,
-            rawJsonKeys: s.raw_json ? Object.keys(s.raw_json) : [],
-          })),
         }, null, 2));
         
         if (!isMounted) return;
         
         setData(json);
 
+        // 🔥 P0: null-safe 상태 처리
         const jobStatus = json?.job?.status || "unknown";
         const jobProgress = json?.job?.progress || 0;
 
         if (jobStatus === "completed") {
           setProgress(100);
           setStatus("completed");
+          // 폴링 중지
+          if (pollingInterval) {
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+          }
         } else if (jobStatus === "failed") {
           setError(json?.job?.error || "리포트 생성에 실패했습니다");
           setStatus("error");
-        } else if (["running", "queued", "pending"].includes(jobStatus)) {
+          if (pollingInterval) {
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+          }
+        } else if (safeIncludes(["running", "queued", "pending"], jobStatus)) {
+          // 🔥 P0: 안전한 includes 사용
           setProgress(jobProgress);
           setStatus("generating");
           startPolling();
@@ -115,7 +134,7 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
       } catch (e: any) {
         if (!isMounted) return;
         console.error("[ReportView] Error:", e);
-        setError(e?.message || "Unknown error");
+        setError(e?.message || "알 수 없는 오류가 발생했습니다");
         setStatus("error");
       }
     };
@@ -135,15 +154,17 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
           
           setData(json);
           
-          const jobStatus = json?.job?.status;
+          const jobStatus = json?.job?.status || "unknown";
           const jobProgress = json?.job?.progress || 0;
           
           if (jobStatus === "completed") {
             if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = null;
             setProgress(100);
             setStatus("completed");
           } else if (jobStatus === "failed") {
             if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = null;
             setError(json?.job?.error || "리포트 생성에 실패했습니다");
             setStatus("error");
           } else {
@@ -217,7 +238,7 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
   // 🔥 생성 중 화면
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   if (status === "generating") {
-    const sections = data?.sections || [];
+    const sections = Array.isArray(data?.sections) ? data.sections : [];
     
     return (
       <div className="min-h-screen bg-gradient-to-b from-slate-50 to-purple-50 py-8">
@@ -247,7 +268,7 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
             {sections.length > 0 && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                 {SECTION_ORDER.map((sid) => {
-                  const section = sections.find((s: any) => s.section_id === sid || s.id === sid);
+                  const section = sections.find((s: any) => (s?.section_id || s?.id) === sid);
                   const sectionStatus = section?.status || "pending";
                   return (
                     <div
@@ -260,7 +281,7 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
                           : "bg-gray-100 text-gray-500"
                       }`}
                     >
-                      {SECTION_ICONS[sid]} {sid}
+                      {SECTION_ICONS[sid] || "📄"} {sid}
                     </div>
                   );
                 })}
@@ -294,6 +315,9 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
     // 사주 기둥
     const pillars = saju?.saju || {};
     
+    // 🔥 P0: 안전한 섹션 배열 처리
+    const safeSections = Array.isArray(sections) ? sections : [];
+    
     return (
       <div className="min-h-screen bg-gradient-to-b from-slate-50 to-purple-50 py-8">
         <div className="container mx-auto px-4 max-w-5xl">
@@ -320,11 +344,16 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
             <div className="grid grid-cols-4 gap-3 mb-4">
               {["hour_pillar", "day_pillar", "month_pillar", "year_pillar"].map((key) => {
                 const pillar = pillars[key];
-                const labels = { hour_pillar: "시주(時)", day_pillar: "일주(日)", month_pillar: "월주(月)", year_pillar: "년주(年)" };
+                const labels: Record<string, string> = { 
+                  hour_pillar: "시주(時)", 
+                  day_pillar: "일주(日)", 
+                  month_pillar: "월주(月)", 
+                  year_pillar: "년주(年)" 
+                };
                 return (
                   <div key={key} className="bg-white/20 rounded-xl p-3 text-center backdrop-blur">
-                    <div className="text-xs text-purple-100 mb-1">{labels[key as keyof typeof labels]}</div>
-                    {pillar ? (
+                    <div className="text-xs text-purple-100 mb-1">{labels[key]}</div>
+                    {pillar && typeof pillar === "string" && pillar.length >= 2 ? (
                       <div className="text-2xl font-bold">
                         {pillar[0]}<br/>{pillar[1]}
                       </div>
@@ -346,11 +375,11 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
           </div>
 
           {/* 🔥🔥🔥 핵심: 섹션 탭 네비게이션 */}
-          {sections && sections.length > 0 && (
+          {safeSections.length > 0 && (
             <>
               <div className="flex flex-wrap gap-2 mb-6 bg-white rounded-xl p-2 shadow">
                 {SECTION_ORDER.map((sid) => {
-                  const section = sections.find((s: any) => s.section_id === sid || s.id === sid);
+                  const section = safeSections.find((s: any) => (s?.section_id || s?.id) === sid);
                   if (!section) return null;
                   
                   return (
@@ -363,7 +392,7 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
                           : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                       }`}
                     >
-                      {SECTION_ICONS[sid]} {sid.charAt(0).toUpperCase() + sid.slice(1)}
+                      {SECTION_ICONS[sid] || "📄"} {sid.charAt(0).toUpperCase() + sid.slice(1)}
                     </button>
                   );
                 })}
@@ -371,17 +400,17 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
 
               {/* 🔥🔥🔥 핵심: 섹션 콘텐츠 렌더링 */}
               <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
-                {sections.map((section: any) => {
-                  const sid = section.section_id || section.id;
+                {safeSections.map((section: any) => {
+                  const sid = section?.section_id || section?.id;
                   if (sid !== activeSection) return null;
                   
-                  const markdown = section.markdown || section.body_markdown || section.content || "";
-                  const title = section.title || SECTION_TITLES[sid] || sid;
+                  const markdown = section?.markdown || section?.body_markdown || section?.content || "";
+                  const title = section?.title || SECTION_TITLES[sid] || sid;
                   
                   return (
                     <div key={sid} className="p-6 md:p-8">
                       <h2 className="text-2xl font-bold text-gray-800 mb-6 pb-4 border-b">
-                        {SECTION_ICONS[sid]} {title}
+                        {SECTION_ICONS[sid] || "📄"} {title}
                       </h2>
                       
                       {markdown ? (
@@ -396,8 +425,8 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
                       
                       {/* 섹션 메타 정보 */}
                       <div className="mt-8 pt-4 border-t flex items-center justify-between text-xs text-gray-400">
-                        <span>신뢰도: {section.confidence || "MEDIUM"}</span>
-                        <span>{section.char_count || markdown.length}자</span>
+                        <span>신뢰도: {section?.confidence || "MEDIUM"}</span>
+                        <span>{section?.char_count || (typeof markdown === "string" ? markdown.length : 0)}자</span>
                       </div>
                     </div>
                   );
@@ -407,7 +436,7 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
           )}
 
           {/* 섹션이 없는 경우 full_markdown으로 렌더 */}
-          {(!sections || sections.length === 0) && full_markdown && (
+          {safeSections.length === 0 && full_markdown && (
             <div className="bg-white rounded-2xl shadow-lg p-6 md:p-8">
               <div className="prose prose-purple max-w-none">
                 <ReactMarkdown>{full_markdown}</ReactMarkdown>
@@ -416,13 +445,13 @@ export default function ReportClient({ jobId, token }: ReportClientProps) {
           )}
 
           {/* 섹션도 full_markdown도 없는 경우 */}
-          {(!sections || sections.length === 0) && !full_markdown && (
+          {safeSections.length === 0 && !full_markdown && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-2xl p-8 text-center">
               <div className="text-5xl mb-4">📭</div>
               <h2 className="text-xl font-bold text-yellow-800 mb-2">섹션 데이터가 없습니다</h2>
               <p className="text-yellow-700">리포트 생성이 완료되었으나 섹션 데이터를 불러올 수 없습니다.</p>
               <pre className="mt-4 p-4 bg-white rounded text-xs text-left overflow-auto max-h-40">
-                {JSON.stringify({ job: job?.status, sectionCount: sections?.length }, null, 2)}
+                {JSON.stringify({ job: job?.status, sectionCount: safeSections.length }, null, 2)}
               </pre>
             </div>
           )}

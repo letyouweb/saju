@@ -86,7 +86,9 @@ async function fetchApi<T>(
       if (error.name === 'AbortError') {
         throw new Error('요청 시간이 초과되었습니다. 다시 시도해주세요.');
       }
-      if (error.message.includes('fetch') || error.message.includes('Failed')) {
+      // 🔥 P0: 안전한 includes 처리
+      const msg = typeof error.message === 'string' ? error.message : '';
+      if (msg.includes('fetch') || msg.includes('Failed') || msg.includes('NetworkError')) {
         throw new Error('서버에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.');
       }
       throw error;

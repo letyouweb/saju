@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';  // 🔥 P0: router 추가
 import SajuForm from '@/components/SajuForm';
 import ResultCard from '@/components/ResultCard';
 import ProgressStepper from '@/components/ProgressStepper';
@@ -13,6 +14,8 @@ type Step = 'input' | 'calculating' | 'generating' | 'result';
 export default function Home() {
   const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주OS';
   const BRAND_TAGLINE = process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? '당신의 사주를 한 번에 정리해드려요';
+
+  const router = useRouter();  // 🔥 P0: router 추가
 
   const getTodayKst = () =>
     new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' });
@@ -70,20 +73,35 @@ export default function Home() {
         throw new Error(response.message || '리포트 생성 시작 실패');
       }
 
-      // 🔥 P0 수정: job_id + token 모두 저장
-      setReportId(response.job_id);
-      localStorage.setItem('sajuos_report_id', response.job_id);
-      localStorage.setItem('sajuos_report_token', response.token);  // 🔥 핵심
+      // 🔥 P0 수정: job_id + token 검증 및 redirect
+      const jobId = response.job_id;
+      const token = response.token;
+      
+      if (!jobId || typeof jobId !== 'string') {
+        console.error('[SajuOS] Invalid job_id:', response);
+        throw new Error('start 응답에 job_id가 없습니다.');
+      }
+      
+      if (!token || typeof token !== 'string') {
+        console.error('[SajuOS] Invalid token:', response);
+        throw new Error('start 응답에 token이 없습니다.');
+      }
+      
+      // localStorage에 저장 (백업용)
+      localStorage.setItem('sajuos_report_id', jobId);
+      localStorage.setItem('sajuos_report_token', token);
       localStorage.setItem('sajuos_report_email', formData.email);
       
       // 🔥 디버그 로그
       console.log('[SajuOS] Report started:', {
-        job_id: response.job_id,
-        token: response.token?.slice(0, 8) + '...',
+        job_id: jobId,
+        token: token.slice(0, 8) + '...',
         view_url: response.view_url
       });
       
-      setStep('generating');
+      // 🔥 P0 핵심: /report/:jobId?token=... 으로 redirect
+      router.push(`/report/${jobId}?token=${encodeURIComponent(token)}`);
+      return;  // redirect 후 종료
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : '알 수 없는 오류가 발생했습니다.';
