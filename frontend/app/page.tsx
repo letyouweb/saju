@@ -71,8 +71,8 @@ export default function Home() {
       }
 
       // Report ID 저장 → localStorage에도 저장 (재접속 복구용)
-      setReportId(response.report_id);
-      localStorage.setItem('sajuos_report_id', response.report_id);
+      setReportId(response.job_id);
+      localStorage.setItem('sajuos_report_id', response.job_id);
       localStorage.setItem('sajuos_report_email', formData.email);
       
       setStep('generating');
