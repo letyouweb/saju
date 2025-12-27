@@ -24,9 +24,9 @@ export const metadata: Metadata = {
   
   // [2] 파비콘 404 에러 방지 설정
   icons: {
-    icon: '/favicon.ico',
-    shortcut: '/favicon.ico',
-    apple: '/apple-icon.png',
+    icon: '/favicon.svg',
+    shortcut: '/favicon.svg',
+    apple: '/favicon.svg',
   },
 
   // [3] 소셜 공유(OG) 설정
