@@ -1,6 +1,5 @@
 """
-Reports API Router v6 - Supabase 테이블 이름 수정
-테이블: report_jobs, report_sections
+Reports API Router v7 - 라우트 순서 수정
 """
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -47,6 +46,10 @@ SECTION_SPECS = [
 ]
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔥 고정 경로 먼저 (/{job_id} 보다 위에!)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 @router.post("/start")
 async def start_report(
     payload: ReportStartRequest,
@@ -79,8 +82,13 @@ async def start_report(
             )
             job_id = job["id"]
             
-            await supabase.init_sections(job_id, SECTION_SPECS)
+            # 섹션 초기화 (실패해도 계속)
+            try:
+                await supabase.init_sections(job_id, SECTION_SPECS)
+            except Exception as e:
+                logger.warning(f"섹션 초기화 스킵: {e}")
             
+            # 백그라운드 작업
             rulestore = getattr(request.app.state, "rulestore", None)
             background_tasks.add_task(run_report_job, job_id, rulestore)
             
@@ -95,6 +103,7 @@ async def start_report(
             logger.error(f"Job 생성 실패: {e}")
             raise HTTPException(status_code=500, detail=str(e)[:300])
     else:
+        # Supabase 없으면 임시 ID 반환
         temp_id = str(uuid.uuid4())
         return {
             "success": True,
@@ -105,9 +114,51 @@ async def start_report(
         }
 
 
+@router.get("/start")
+async def start_report_get():
+    """GET /start는 지원하지 않음"""
+    return {"error": "Use POST method", "method": "POST /api/reports/start"}
+
+
+@router.get("/sections-info")
+async def get_sections_info():
+    """섹션 정보"""
+    return {"sections": SECTION_SPECS}
+
+
+@router.get("/view/{token}")
+async def view_by_token(token: str):
+    """토큰으로 결과 조회"""
+    supabase = get_supabase()
+    
+    if not supabase or not supabase.is_available():
+        raise HTTPException(status_code=503, detail="Supabase 미연결")
+    
+    job = await supabase.get_job_by_token(token)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Invalid token")
+    
+    return {
+        "job_id": job["id"],
+        "status": job.get("status"),
+        "result": job.get("result_json") if job.get("status") == "completed" else None
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🔥 동적 경로는 마지막에!
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 @router.get("/{job_id}")
 async def get_report_status(job_id: str):
     """폴링용 상태 조회"""
+    # UUID 형식 체크
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid job_id format: {job_id}")
+    
     supabase = get_supabase()
     
     if not supabase or not supabase.is_available():
@@ -123,7 +174,6 @@ async def get_report_status(job_id: str):
             "job_id": job_id,
             "status": job.get("status", "unknown"),
             "progress": job.get("progress", 0),
-            "current_step": job.get("step", ""),
             "sections": [
                 {"id": s.get("section_id"), "status": s.get("status")}
                 for s in job.get("sections", [])
@@ -141,6 +191,11 @@ async def get_report_status(job_id: str):
 @router.get("/{job_id}/result")
 async def get_report_result(job_id: str):
     """완료된 리포트 결과"""
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid job_id: {job_id}")
+    
     supabase = get_supabase()
     
     if not supabase or not supabase.is_available():
@@ -157,25 +212,9 @@ async def get_report_result(job_id: str):
     return {"completed": True, "result": job.get("result_json")}
 
 
-@router.get("/view/{token}")
-async def view_by_token(token: str):
-    """토큰으로 결과 조회 (이메일 링크용)"""
-    supabase = get_supabase()
-    
-    if not supabase or not supabase.is_available():
-        raise HTTPException(status_code=503, detail="Supabase 미연결")
-    
-    job = await supabase.get_job_by_token(token)
-    
-    if not job:
-        raise HTTPException(status_code=404, detail="Invalid token")
-    
-    return {
-        "job_id": job["id"],
-        "status": job.get("status"),
-        "result": job.get("result_json") if job.get("status") == "completed" else None
-    }
-
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 백그라운드 작업
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def run_report_job(job_id: str, rulestore):
     """백그라운드 리포트 생성"""
