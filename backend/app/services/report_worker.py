@@ -106,13 +106,14 @@ class ReportWorker:
                 )
                 
                 content = section_result.get("content", {})
+                guardrail_ok = section_result.get("ok", True)  # 🔥 ok 필드 체크
                 guardrail_errors = section_result.get("guardrail_errors", [])
                 
-                # 🔥 가드레일 실패 체크
-                if guardrail_errors:
+                # 🔥 P0-2: ok=False면 실패 (guardrail_errors 체크 대신 ok 사용)
+                if not guardrail_ok:
                     failed_sections.append({
                         "section_id": section_id,
-                        "errors": guardrail_errors
+                        "errors": guardrail_errors or ["가드레일 검사 실패"]
                     })
                     logger.warning(f"[Worker] 섹션 가드레일 실패: {section_id} | {guardrail_errors}")
                 
@@ -122,13 +123,14 @@ class ReportWorker:
                     section_id=section_id,
                     content_json={
                         **content,
-                        "guardrail_passed": len(guardrail_errors) == 0,
+                        "guardrail_passed": guardrail_ok,  # 🔥 ok 필드 사용
                         "guardrail_errors": guardrail_errors
                     }
                 )
                 
                 sections_result[section_id] = content
-                logger.info(f"[Worker] 섹션 완료: {section_id} (가드레일: {'✅' if not guardrail_errors else '❌'})")
+                # 🔥 로그도 ok 기반으로 출력
+                logger.info(f"[Worker] 섹션 완료: {section_id} (가드레일: {'✅' if guardrail_ok else '❌'})")
                 
             except Exception as e:
                 logger.error(f"[Worker] 섹션 실패: {section_id} | {e}")
@@ -187,7 +189,7 @@ class ReportWorker:
     ) -> Dict[str, Any]:
         """
         섹션 생성 + 가드레일 검사 + 자동 리라이트
-        Returns: {"content": {...}, "guardrail_errors": [...]}
+        Returns: {"ok": bool, "content": {...}, "guardrail_errors": [...]}
         """
         try:
             from app.services.report_builder import premium_report_builder
@@ -203,10 +205,11 @@ class ReportWorker:
             )
             
             content = result.get("content", {})
+            ok = result.get("ok", True)  # 🔥 ok 필드 가져오기
             guardrail_errors = result.get("guardrail_errors", [])
             
             # 🔥 P0-5: 가드레일 실패 시 자동 리라이트 1회
-            if guardrail_errors and max_retries > 0:
+            if not ok and max_retries > 0:
                 logger.info(f"[Worker] 자동 리라이트 시도: {section_id}")
                 
                 # 리라이트 프롬프트 추가
@@ -222,14 +225,16 @@ class ReportWorker:
                 )
                 
                 content = result.get("content", {})
+                ok = result.get("ok", True)  # 🔥 리라이트 후 ok 체크
                 guardrail_errors = result.get("guardrail_errors", [])
                 
-                if guardrail_errors:
+                if not ok:
                     logger.warning(f"[Worker] 리라이트 후에도 가드레일 실패: {section_id} | {guardrail_errors}")
                 else:
                     logger.info(f"[Worker] 리라이트 성공: {section_id}")
             
             return {
+                "ok": ok,  # 🔥 ok 필드 반환
                 "content": content,
                 "guardrail_errors": guardrail_errors
             }
@@ -237,6 +242,7 @@ class ReportWorker:
         except Exception as e:
             logger.error(f"섹션 생성 오류: {section_id} | {e}")
             return {
+                "ok": False,  # 🔥 예외 시 ok=False
                 "content": {"summary": f"{section_id} 생성 실패", "error": str(e)[:200]},
                 "guardrail_errors": [f"Exception: {str(e)[:100]}"]
             }

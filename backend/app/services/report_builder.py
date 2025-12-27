@@ -873,7 +873,14 @@ class PremiumReportBuilder:
                         logger.error(f"[Section:{section_id}] ❌ 가드레일 최종 실패 | Errors: {errors}")
             
             latency_ms = int((time.time() - start_time) * 1000)
-            return {"content": content, "latency_ms": latency_ms, "guardrail_errors": errors if not is_valid else []}
+            
+            # 🔥 P0-2: ok 필드 명확히 반환 (is_valid 기반)
+            return {
+                "ok": is_valid,  # 🔥 핵심: 가드레일 통과 여부
+                "content": content, 
+                "latency_ms": latency_ms, 
+                "guardrail_errors": errors if not is_valid else []
+            }
     
     async def build_premium_report(
         self,

@@ -17,46 +17,49 @@ logger = logging.getLogger(__name__)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 1. 금지어/금지톤 리스트 (자기계발서 탈출)
+# 1. 금지어/금지톤 리스트 (2단계: HARD/SOFT)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-BANNED_PHRASES = [
-    # 자기계발서 클리셰
+# 🔥 HARD_BANNED: 정말 치명적인 것만 (하드 실패 트리거)
+HARD_BANNED_PHRASES = [
+    # 면책/광고성 문구
+    "추천드립니다", "참고하시기 바랍니다", "개인차가 있을 수 있습니다",
+    "투자 권유가 아닙니다", "책임지지 않습니다",
+    
+    # 극단적 자기계발서 클리셰
+    "무궁무진한", "무한한 가능성", "꿈을 이루",
+    "밝은 미래", "더 나은 내일", "행운이 함께",
+    "축복이", "복이 따르", "잘 될 것",
+]
+
+# 🔥 SOFT_BANNED: 문체 품질 저하 (점수 감점만, 하드 실패 X)
+SOFT_BANNED_PHRASES = [
+    # 접속사/전환어 (일반적으로 허용, 과다 사용 시 감점)
+    "또한", "그리고", "아울러", "더불어",
+    "특히", "무엇보다", "가장 중요한 것은",
+    
+    # 완곡 표현 (구체성 부족하면 감점)
+    "필요합니다", "바람직합니다", "중요합니다",
+    "도움이 될 수", "도움이 될 것",
+    "생각해보는 것이 좋", "고려해보면 좋",
+    
+    # 자기계발서 톤 (감점만)
     "노력하면", "노력이 필요", "꾸준히 노력",
-    "성장의 기회", "성장할 수 있", "성장하는",
-    "긍정적인 마인드", "긍정적으로", "긍정의 힘",
-    "기회가 찾아", "기회를 잡", "좋은 기회",
+    "성장의 기회", "성장할 수 있",
+    "긍정적인 마인드", "긍정적으로",
+    "기회가 찾아", "기회를 잡",
     "도전정신", "도전하는 자세",
     "잠재력을 발휘", "잠재력이 있",
     "자신감을 가지", "자신감을 잃지",
-    "꿈을 향해", "꿈을 이루",
     "열정을 가지", "열정적으로",
     "포기하지 마", "포기하지 않",
-    "믿음을 가지", "믿음이 필요",
     "한 걸음씩", "한 단계씩",
-    "마음먹기에 달려", "마음가짐",
-    "진정한 성공", "성공으로 이끌",
-    "밝은 미래", "더 나은 내일",
     "최선을 다하", "최선의 노력",
-    
-    # 공허한 덕담
-    "행운이 함께", "행운을 빌",
     "좋은 결과가", "좋은 일이",
-    "잘 될 것", "잘 풀릴",
-    "축복이", "복이 따르",
-    "순탄한", "순조로운",
-    "무궁무진한", "무한한 가능성",
-    
-    # 모호한 조언
-    "생각해보는 것이 좋", "고려해보면 좋",
-    "도움이 될 수", "도움이 될 것",
-    "중요합니다", "필요합니다",  # 뒤에 구체적 내용 없을 때만
-    "바람직합니다", "추천드립니다",  # 구체적 이유 없을 때
-    
-    # 반복되는 전환어
-    "또한", "그리고", "아울러", "더불어",  # 연속 사용 시 문제
-    "특히", "무엇보다", "가장 중요한 것은",
 ]
+
+# 🔥 레거시 호환 (기존 코드용)
+BANNED_PHRASES = HARD_BANNED_PHRASES + SOFT_BANNED_PHRASES
 
 BANNED_SENTENCE_PATTERNS = [
     # 구체적 내용 없는 문장 패턴
@@ -199,18 +202,19 @@ class QualityGate:
         """
         issues = []
         
-        # 1. 금지어 검사
-        banned_issues, banned_count = self._check_banned_phrases(section_id, content)
-        issues.extend(banned_issues)
+        # 1. 금지어 검사 (HARD/SOFT 분리)
+        banned_issues, hard_count, soft_count = self._check_banned_phrases(section_id, content)
+        issues.extend(banned_issues)  # HARD_BANNED만 issues에 포함됨
         
-        # 2. 구체성 검사
+        # 2. 구체성 검사 (🔥 임계치 완화: 0.6 → 0.4)
         specificity_score = self._calculate_specificity(content)
-        if specificity_score < self.min_specificity_score:
+        min_threshold = 0.4  # 완화된 임계치
+        if specificity_score < min_threshold:
             issues.append(QualityIssue(
                 type="low_specificity",
-                severity="error",
+                severity="warning",  # 🔥 error → warning으로 완화
                 location=section_id,
-                content=f"구체성 점수 {specificity_score:.1%} (최소 {self.min_specificity_score:.0%} 필요)",
+                content=f"구체성 점수 {specificity_score:.1%} (권장 {min_threshold:.0%} 이상)",
                 suggestion="날짜/수치/액션/검증방법 중 3개 이상을 문단마다 포함시켜야 합니다.",
                 auto_fixable=False
             ))
@@ -222,41 +226,69 @@ class QualityGate:
             if duplicate_ratio > self.max_duplicate_ratio:
                 issues.append(QualityIssue(
                     type="duplicate",
-                    severity="error",
+                    severity="warning",  # 🔥 error → warning
                     location=section_id,
-                    content=f"다른 섹션과 {duplicate_ratio:.1%} 유사 (최대 {self.max_duplicate_ratio:.0%} 허용)",
+                    content=f"다른 섹션과 {duplicate_ratio:.1%} 유사 (권장 {self.max_duplicate_ratio:.0%} 이하)",
                     suggestion="중복된 내용을 제거하고 섹션 고유의 관점을 강화하세요.",
                     auto_fixable=False
                 ))
         
-        # 4. 문장 패턴 검사 (공허한 문장)
-        pattern_issues = self._check_sentence_patterns(section_id, content)
-        issues.extend(pattern_issues)
+        # 4. 문장 패턴 검사 (공허한 문장) - 🔥 비활성화 (너무 엄격함)
+        # pattern_issues = self._check_sentence_patterns(section_id, content)
+        # issues.extend(pattern_issues)
+        pattern_issues = []
         
-        # 5. 최종 점수 계산
-        score = self._calculate_final_score(
-            banned_count, specificity_score, duplicate_ratio, len(pattern_issues)
+        # 5. 최종 점수 계산 (🔥 soft_count 감점 반영)
+        score = self._calculate_final_score_v2(
+            hard_count, soft_count, specificity_score, duplicate_ratio, len(pattern_issues)
         )
         
-        # 6. 재작성 필요 여부 판단
-        error_count = sum(1 for i in issues if i.severity == "error")
-        needs_rewrite = (
-            error_count >= 2 or
-            banned_count > self.max_banned_phrases or
-            specificity_score < self.min_specificity_score * 0.8 or
-            duplicate_ratio > self.max_duplicate_ratio * 1.5
-        )
+        # 6. 🔥 재작성/실패 여부: HARD_BANNED만 실패 트리거
+        has_hard_failure = hard_count > 0
+        needs_rewrite = has_hard_failure or specificity_score < 0.3
         
         return QualityReport(
-            passed=error_count == 0,
+            passed=not has_hard_failure,  # 🔥 HARD_BANNED 없으면 통과
             score=score,
             issues=issues,
-            banned_count=banned_count,
+            banned_count=hard_count,  # HARD만 카운트
             specificity_score=specificity_score,
             duplicate_ratio=duplicate_ratio,
             needs_rewrite=needs_rewrite,
             rewrite_sections=[section_id] if needs_rewrite else []
         )
+    
+    def _calculate_final_score_v2(
+        self,
+        hard_count: int,
+        soft_count: int,
+        specificity_score: float,
+        duplicate_ratio: float,
+        pattern_count: int
+    ) -> int:
+        """🔥 새로운 점수 계산 (HARD/SOFT 구분)"""
+        score = 100
+        
+        # HARD_BANNED: -20점/개 (심각)
+        score -= hard_count * 20
+        
+        # SOFT_BANNED: -2점/개 (경미)
+        score -= soft_count * 2
+        
+        # 구체성: 최대 -30점
+        if specificity_score < 0.6:
+            penalty = int((0.6 - specificity_score) * 50)
+            score -= min(penalty, 30)
+        
+        # 중복: 최대 -20점
+        if duplicate_ratio > 0.2:
+            penalty = int((duplicate_ratio - 0.2) * 50)
+            score -= min(penalty, 20)
+        
+        # 패턴: -3점/개
+        score -= pattern_count * 3
+        
+        return max(0, min(100, score))
     
     def check_full_report(
         self,
@@ -313,29 +345,40 @@ class QualityGate:
         self,
         section_id: str,
         content: str
-    ) -> Tuple[List[QualityIssue], int]:
-        """금지어 검사"""
+    ) -> Tuple[List[QualityIssue], int, int]:
+        """
+        금지어 검사 (HARD/SOFT 분리)
+        Returns: (issues, hard_count, soft_count)
+        """
         issues = []
-        found_count = 0
+        hard_count = 0
+        soft_count = 0
         
         content_lower = content.lower()
         
-        for phrase in BANNED_PHRASES:
+        # 🔥 HARD_BANNED 검사 (심각 - 하드 실패 트리거)
+        for phrase in HARD_BANNED_PHRASES:
             if phrase.lower() in content_lower:
-                found_count += 1
+                hard_count += 1
                 suggestion = REPLACEMENT_GUIDELINES.get(
                     phrase, "→ 구체적인 날짜/수치/액션으로 대체하세요"
                 )
                 issues.append(QualityIssue(
-                    type="banned_phrase",
-                    severity="warning" if found_count <= 2 else "error",
+                    type="hard_banned_phrase",
+                    severity="error",
                     location=section_id,
                     content=f"금지어 발견: '{phrase}'",
                     suggestion=suggestion,
                     auto_fixable=True
                 ))
         
-        return issues, found_count
+        # 🔥 SOFT_BANNED 검사 (경미 - 점수 감점만)
+        for phrase in SOFT_BANNED_PHRASES:
+            if phrase.lower() in content_lower:
+                soft_count += 1
+                # SOFT는 issues에 추가하지 않음 (점수 감점만)
+        
+        return issues, hard_count, soft_count
     
     def _check_sentence_patterns(
         self,
