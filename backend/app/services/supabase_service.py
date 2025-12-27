@@ -1,10 +1,10 @@
 """
-Supabase Service v7 - 실제 DB 스키마에 맞춤
+Supabase Service v8 - 실제 DB 컬럼에 정확히 맞춤
+report_jobs: id, user_email, public_token, status, progress, current_step
 """
 import os
 import logging
 from typing import Dict, Any, Optional, List
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +37,16 @@ class SupabaseService:
     def is_available(self) -> bool:
         return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
     
-    async def create_job(self, email: str, name: str, input_data: Dict, target_year: int = 2026) -> Dict:
-        """Job 생성 - 최소 컬럼만 사용"""
+    async def create_job(self, email: str, name: str = "", input_data: Dict = None, target_year: int = 2026) -> Dict:
+        """Job 생성 - 실제 DB 컬럼만 사용"""
         client = self._get_client()
         
-        # 🔥 report_jobs 테이블의 실제 컬럼만 사용
+        # 🔥 실제 존재하는 컬럼만!
         data = {
             "user_email": email,
-            "input_json": {
-                **input_data,
-                "name": name,
-                "target_year": target_year
-            },
             "status": "queued",
-            "progress": 0
+            "progress": 0,
+            "current_step": "queued"
         }
         
         result = client.table("report_jobs").insert(data).execute()
@@ -74,25 +70,25 @@ class SupabaseService:
         result = client.table("report_jobs").select("*").eq("public_token", token).execute()
         return result.data[0] if result.data else None
     
-    async def update_progress(self, job_id: str, progress: int, status: str = "running"):
-        """진행률 업데이트 - step 컬럼 없이"""
+    async def update_progress(self, job_id: str, progress: int, step: str = "", status: str = "running"):
+        """진행률 업데이트"""
         client = self._get_client()
-        client.table("report_jobs").update({
+        data = {
             "status": status,
             "progress": progress
-        }).eq("id", job_id).execute()
+        }
+        if step:
+            data["current_step"] = step
+        client.table("report_jobs").update(data).eq("id", job_id).execute()
     
-    async def complete_job(self, job_id: str, result_json: Dict, markdown: str = ""):
+    async def complete_job(self, job_id: str, result_json: Dict = None, markdown: str = ""):
         """Job 완료"""
         client = self._get_client()
-        update_data = {
+        client.table("report_jobs").update({
             "status": "completed",
             "progress": 100,
-            "result_json": result_json
-        }
-        if markdown:
-            update_data["markdown"] = markdown
-        client.table("report_jobs").update(update_data).eq("id", job_id).execute()
+            "current_step": "completed"
+        }).eq("id", job_id).execute()
         logger.info(f"[Supabase] ✅ Job 완료: {job_id}")
     
     async def fail_job(self, job_id: str, error: str):
@@ -100,9 +96,9 @@ class SupabaseService:
         client = self._get_client()
         client.table("report_jobs").update({
             "status": "failed",
-            "error": error[:500]
+            "current_step": "failed"
         }).eq("id", job_id).execute()
-        logger.error(f"[Supabase] ❌ Job 실패: {job_id}")
+        logger.error(f"[Supabase] ❌ Job 실패: {job_id} | {error[:100]}")
     
     async def save_section(self, job_id: str, section_id: str, content_json: Dict):
         """섹션 저장"""
@@ -115,8 +111,7 @@ class SupabaseService:
             "job_id": job_id,
             "section_id": section_id,
             "status": "completed",
-            "progress": 100,
-            "raw_json": content_json
+            "progress": 100
         }
         
         if existing.data:
@@ -155,13 +150,13 @@ class SupabaseService:
                         "progress": 0
                     }).execute()
             except Exception as e:
-                logger.warning(f"섹션 초기화 실패: {spec['id']} | {e}")
+                logger.warning(f"섹션 초기화 스킵: {spec['id']} | {e}")
     
     async def get_jobs_by_status(self, status: str, limit: int = 50) -> List[Dict]:
         """상태별 Job 조회"""
         try:
             client = self._get_client()
-            result = client.table("report_jobs").select("id,user_email,status,created_at").eq(
+            result = client.table("report_jobs").select("*").eq(
                 "status", status).order("created_at", desc=True).limit(limit).execute()
             return result.data or []
         except:
