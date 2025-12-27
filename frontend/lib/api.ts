@@ -1,9 +1,9 @@
 /**
- * Railway 백엔드 API 통신 모듈 v2
+ * Railway 백엔드 API 통신 모듈 v3
  * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- * - Supabase 영구 저장 기반
- * - DB 영속화 + 서버 재시작 복구 지원
- * - 폴링 방식 진행 상태 조회
+ * 🔥 P0 수정:
+ * - 절대주소 사용 (https://api.sajuos.com)
+ * - /view/{job_id}?token={token} 형식
  * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  */
 
@@ -16,17 +16,23 @@ import type {
   ConcernOption,
 } from '@/types';
 
-// ============ 환경변수 ============
+// ============ 🔥 환경변수 - 절대주소 강제 ============
+
+// 프로덕션: 항상 https://api.sajuos.com 사용
+const PROD_API_URL = 'https://api.sajuos.com';
+const DEV_API_URL = 'http://localhost:8000';
 
 function getApiBaseUrl(): string {
-  const url = process.env.NEXT_PUBLIC_API_URL;
-  if (!url) {
-    if (process.env.NODE_ENV === 'development') {
-      return 'http://localhost:8000';
-    }
-    return 'https://api.sajuos.com';
+  // 🔥 프로덕션 환경에서는 무조건 절대주소
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    return PROD_API_URL;
   }
-  return url;
+  
+  // 개발 환경에서만 환경변수 또는 localhost
+  const url = process.env.NEXT_PUBLIC_API_URL;
+  if (url) return url;
+  
+  return DEV_API_URL;
 }
 
 export const API_BASE_URL = getApiBaseUrl();
@@ -45,6 +51,8 @@ async function fetchApi<T>(
 ): Promise<T> {
   const { method = 'GET', body, timeout = 30000 } = options;
   const fullUrl = `${API_BASE_URL}${endpoint}`;
+  
+  console.log(`[API] ${method} ${fullUrl}`);  // 🔥 디버그 로그
   
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -90,9 +98,6 @@ async function fetchApi<T>(
 
 // ============ 기본 API 함수들 ============
 
-/**
- * 사주 계산 API
- */
 export async function calculateSaju(
   data: CalculateRequest
 ): Promise<CalculateResponse> {
@@ -102,9 +107,6 @@ export async function calculateSaju(
   );
 }
 
-/**
- * 시간대 옵션 조회
- */
 export async function getHourOptions(): Promise<HourOption[]> {
   return fetchApi<HourOption[]>(
     '/api/v1/calculate/hour-options',
@@ -112,9 +114,6 @@ export async function getHourOptions(): Promise<HourOption[]> {
   );
 }
 
-/**
- * 고민 유형 (로컬)
- */
 export function getConcernTypes(): { concern_types: ConcernOption[] } {
   return {
     concern_types: [
@@ -128,16 +127,10 @@ export function getConcernTypes(): { concern_types: ConcernOption[] } {
   };
 }
 
-/**
- * 헬스체크
- */
 export async function healthCheck(): Promise<{ status: string }> {
   return fetchApi<{ status: string }>('/health', { timeout: 5000 });
 }
 
-/**
- * 연결 테스트
- */
 export async function testConnection(): Promise<{
   success: boolean;
   apiUrl: string;
@@ -156,7 +149,7 @@ export async function testConnection(): Promise<{
 }
 
 
-// ============ 🔥 프리미엄 리포트 API (Supabase 기반) ============
+// ============ 🔥 프리미엄 리포트 API ============
 
 export interface ReportStartRequest {
   email: string;
@@ -169,7 +162,7 @@ export interface ReportStartRequest {
   target_year?: number;
   question?: string;
   concern_type?: string;
-  survey_data?: {  // 🔥 7문항 설문 데이터
+  survey_data?: {
     industry?: string;
     business_stage?: string;
     monthly_revenue?: string;
@@ -185,70 +178,62 @@ export interface ReportStartRequest {
 
 export interface ReportStartResponse {
   success: boolean;
-  report_id: string;
+  job_id: string;
   status: string;
   message: string;
-  status_url: string;
-  result_url: string;
+  poll_url: string;
 }
 
-export interface ReportStatusResponse {
-  report_id: string;
-  status: 'pending' | 'generating' | 'completed' | 'failed';
+export interface ReportViewResponse {
+  job_id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
   progress: number;
-  current_step: string;
-  sections: Array<{
-    id: string;
-    title: string;
-    status: string;
-    order: number;
-    char_count: number;
-    elapsed_ms: number;
-    error: string | null;
-  }>;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ReportResultResponse {
-  completed: boolean;
-  report_id?: string;
   result?: any;
-  pdf_url?: string;
-  generated_at?: string;
-  generation_time_ms?: number;
-  status?: string;
-  progress?: number;
-  message?: string;
-  error?: string;  // 에러 메시지
-  name?: string;
-  target_year?: number;
+  markdown?: string;
+  error?: string;
 }
 
 /**
- * 🔥 프리미엄 리포트 생성 시작 (Supabase 저장)
- * - 즉시 report_id 반환
- * - 서버에서 백그라운드 생성 (DB 영속화)
- * - 완료 시 이메일 발송
+ * 🔥 프리미엄 리포트 생성 시작
  */
 export async function startReportGeneration(
   data: ReportStartRequest
 ): Promise<ReportStartResponse> {
   return fetchApi<ReportStartResponse>(
-    '/api/v1/reports/start',  // 🔥 통일: /api/v1 prefix
+    '/api/v1/reports/start',
     { method: 'POST', body: data, timeout: 30000 }
   );
 }
 
 /**
- * 리포트 진행 상태 조회 (폴링용)
+ * 🔥 P0 수정: job_id + token으로 리포트 조회
+ * 엔드포인트: /api/v1/reports/view/{job_id}?token={token}
+ */
+export async function getReportByJobIdAndToken(
+  jobId: string,
+  token: string
+): Promise<ReportViewResponse> {
+  if (!jobId || !token) {
+    throw new Error('job_id와 token이 필요합니다');
+  }
+  
+  // 🔥 핵심: /view/{job_id}?token={token} 형식
+  return fetchApi<ReportViewResponse>(
+    `/api/v1/reports/view/${jobId}?token=${encodeURIComponent(token)}`,
+    { timeout: 15000 }
+  );
+}
+
+/**
+ * 리포트 상태 조회 (폴링용, 토큰 옵션)
  */
 export async function getReportStatus(
-  reportId: string
-): Promise<ReportStatusResponse> {
-  return fetchApi<ReportStatusResponse>(
-    `/api/v1/reports/${reportId}/status`,  // 🔥 통일
+  jobId: string,
+  token?: string
+): Promise<ReportViewResponse> {
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+  return fetchApi<ReportViewResponse>(
+    `/api/v1/reports/${jobId}${tokenParam}`,
     { timeout: 10000 }
   );
 }
@@ -257,57 +242,34 @@ export async function getReportStatus(
  * 리포트 결과 조회
  */
 export async function getReportResult(
-  reportId: string,
+  jobId: string,
   token?: string
-): Promise<ReportResultResponse> {
-  const tokenParam = token ? `?token=${token}` : '';
-  return fetchApi<ReportResultResponse>(
-    `/api/v1/reports/${reportId}/result${tokenParam}`,  // 🔥 통일
+): Promise<ReportViewResponse> {
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+  return fetchApi<ReportViewResponse>(
+    `/api/v1/reports/${jobId}/result${tokenParam}`,
     { timeout: 10000 }
   );
 }
 
 /**
- * 토큰으로 리포트 조회 (이메일 링크용)
+ * @deprecated getReportByJobIdAndToken 사용
  */
-export async function getReportByToken(
-  accessToken: string
-): Promise<ReportResultResponse> {
-  return fetchApi<ReportResultResponse>(
-    `/api/v1/reports/view/${accessToken}`,  // 🔥 통일
-    { timeout: 10000 }
-  );
-}
-
-/**
- * 실패한 리포트 재시도
- */
-export async function retryReport(
-  reportId: string
-): Promise<{ success: boolean; message: string }> {
-  return fetchApi<{ success: boolean; message: string }>(
-    `/api/v1/reports/${reportId}/retry`,  // 🔥 통일
-    { method: 'POST', timeout: 10000 }
-  );
+export async function getReportByToken(accessToken: string): Promise<ReportViewResponse> {
+  // 레거시 호환: token만 있으면 job_id로 간주하고 에러
+  console.warn('[API] getReportByToken is deprecated. Use getReportByJobIdAndToken instead.');
+  throw new Error('job_id와 token이 모두 필요합니다. URL 형식: /report/{job_id}?token={token}');
 }
 
 
-// ============ 레거시 API (호환성 유지) ============
+// ============ 레거시 API ============
 
-/**
- * 레거시 동기 리포트 생성 (구버전 호환)
- * @deprecated startReportGeneration 사용 권장
- */
 export async function interpretSaju(
   data: InterpretRequest
 ): Promise<InterpretResponse> {
   const result = await fetchApi<InterpretResponse>(
     '/api/v1/generate-report?mode=premium',
-    { 
-      method: 'POST', 
-      body: data, 
-      timeout: 600000 // 10분
-    }
+    { method: 'POST', body: data, timeout: 600000 }
   );
   
   if ((result as any).model_used === 'fallback') {
@@ -317,19 +279,12 @@ export async function interpretSaju(
   return result;
 }
 
-/**
- * 단일 섹션 재생성 API
- */
 export async function regenerateSection(
   data: InterpretRequest,
   sectionId: string
 ): Promise<any> {
   return fetchApi<any>(
     `/api/v1/regenerate-section?section_id=${sectionId}`,
-    { 
-      method: 'POST', 
-      body: data, 
-      timeout: 120000
-    }
+    { method: 'POST', body: data, timeout: 120000 }
   );
 }

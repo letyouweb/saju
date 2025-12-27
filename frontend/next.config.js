@@ -1,19 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  async rewrites() {
-    // 🔥 P0: Vercel 배포 시 Railway 공개 URL 사용
-    const backendUrl = process.env.BACKEND_URL || 'https://saju-production-6438.up.railway.app'
-    
-    console.log(`[Next.js] Rewrites destination: ${backendUrl}`)
-    
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${backendUrl}/api/:path*`
-      }
-    ]
-  }
+  // 🔥 P0: rewrite 제거 - 프론트엔드는 https://api.sajuos.com 절대주소로 직접 호출
+  // Vercel의 DNS_HOSTNAME_RESOLVED_PRIVATE 에러 방지
 }
 
 module.exports = nextConfig

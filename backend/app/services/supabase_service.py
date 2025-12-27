@@ -88,27 +88,25 @@ class SupabaseService:
     
     async def verify_job_token(self, job_id: str, token: str) -> tuple[bool, Optional[Dict]]:
         """
-        🔥 Job ID + Token 검증
+        🔥 Job ID + Token 검증 (단일 쿼리)
+        조건: id = job_id AND public_token = token
         Returns: (is_valid, job_data)
         """
+        if not token:
+            logger.warning(f"[Supabase] 토큰 없음")
+            return False, None
+        
         client = self._get_client()
-        result = client.table("report_jobs").select("*").eq("id", job_id).execute()
+        
+        # 🔥 핵심: id AND public_token 동시 조건
+        result = client.table("report_jobs").select("*").eq("id", job_id).eq("public_token", token).execute()
         
         if not result.data:
-            logger.warning(f"[Supabase] Job 없음: {job_id}")
+            logger.warning(f"[Supabase] 토큰 검증 실패: job={job_id}, token={token[:8] if token else 'None'}...")
             return False, None
         
         job = result.data[0]
-        stored_token = job.get("public_token")
-        
-        if not stored_token:
-            logger.error(f"[Supabase] Job에 public_token 없음: {job_id}")
-            return False, None
-        
-        if stored_token != token:
-            logger.warning(f"[Supabase] 토큰 불일치: job={job_id}, expected={stored_token[:8]}..., got={token[:8] if token else 'None'}...")
-            return False, None
-        
+        logger.info(f"[Supabase] ✅ 토큰 검증 성공: job={job_id}")
         return True, job
     
     async def update_progress(self, job_id: str, progress: int, status: str = "running"):

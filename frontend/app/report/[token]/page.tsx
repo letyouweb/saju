@@ -1,16 +1,24 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import ResultCard from '@/components/ResultCard';
-import ProgressStepper from '@/components/ProgressStepper';
-import { getReportByToken } from '@/lib/api';
+import { getReportByJobIdAndToken } from '@/lib/api';
 
 type PageStatus = 'loading' | 'generating' | 'completed' | 'error';
 
+/**
+ * 🔥 P0 수정: /report/{job_id}?token={token} 형식 지원
+ * - URL path: job_id
+ * - URL query: token
+ */
 export default function ReportPage() {
   const params = useParams();
-  const token = params.token as string;
+  const searchParams = useSearchParams();
+  
+  // 🔥 job_id는 path에서, token은 query에서
+  const jobId = params.token as string;  // 폴더명이 [token]이지만 실제로는 job_id
+  const token = searchParams.get('token');
   
   const [status, setStatus] = useState<PageStatus>('loading');
   const [reportData, setReportData] = useState<any>(null);
@@ -18,11 +26,29 @@ export default function ReportPage() {
   const [progress, setProgress] = useState(0);
 
   useEffect(() => {
-    if (!token) return;
+    // 🔥 job_id와 token 둘 다 필요
+    if (!jobId) {
+      setError('잘못된 링크입니다 (job_id 없음)');
+      setStatus('error');
+      return;
+    }
+    
+    if (!token) {
+      setError('잘못된 링크입니다 (token 없음). 이메일의 링크를 다시 확인해주세요.');
+      setStatus('error');
+      return;
+    }
+
+    let pollingInterval: NodeJS.Timeout | null = null;
 
     const fetchReport = async () => {
       try {
-        const data = await getReportByToken(token);
+        console.log(`[ReportPage] Fetching: jobId=${jobId}, token=${token.substring(0, 8)}...`);
+        
+        // 🔥 핵심: job_id + token으로 조회
+        const data = await getReportByJobIdAndToken(jobId, token);
+        
+        console.log(`[ReportPage] Response: status=${data.status}, progress=${data.progress}`);
         
         if (data.status === 'completed' && data.result) {
           setReportData({
@@ -30,50 +56,63 @@ export default function ReportPage() {
             interpretResult: data.result,
           });
           setStatus('completed');
-        } else if (data.status === 'generating' || data.status === 'pending') {
+        } else if (data.status === 'running' || data.status === 'pending') {
           setProgress(data.progress || 0);
           setStatus('generating');
           // 폴링 시작
           startPolling();
         } else if (data.status === 'failed') {
-          setError(data.error || '리포트 생성 실패');
+          setError(data.error || '리포트 생성에 실패했습니다');
           setStatus('error');
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : '리포트를 불러올 수 없습니다');
+        console.error('[ReportPage] Error:', e);
+        const errorMsg = e instanceof Error ? e.message : '리포트를 불러올 수 없습니다';
+        
+        // Invalid token 에러 처리
+        if (errorMsg.includes('Invalid token') || errorMsg.includes('404')) {
+          setError('유효하지 않은 링크입니다. 이메일의 링크를 다시 확인해주세요.');
+        } else {
+          setError(errorMsg);
+        }
         setStatus('error');
       }
     };
 
     const startPolling = () => {
-      const interval = setInterval(async () => {
+      if (pollingInterval) return;
+      
+      pollingInterval = setInterval(async () => {
         try {
-          const data = await getReportByToken(token);
+          const data = await getReportByJobIdAndToken(jobId, token);
           
           if (data.status === 'completed' && data.result) {
-            clearInterval(interval);
+            if (pollingInterval) clearInterval(pollingInterval);
             setReportData({
               calculateResult: data.result.legacy?.saju_data || {},
               interpretResult: data.result,
             });
             setStatus('completed');
           } else if (data.status === 'failed') {
-            clearInterval(interval);
-            setError(data.error || '리포트 생성 실패');
+            if (pollingInterval) clearInterval(pollingInterval);
+            setError(data.error || '리포트 생성에 실패했습니다');
             setStatus('error');
           } else {
             setProgress(data.progress || 0);
           }
         } catch (e) {
-          // 폴링 에러는 무시
+          // 폴링 에러는 무시 (네트워크 일시 오류 등)
+          console.warn('[ReportPage] Polling error (ignored):', e);
         }
       }, 3000);
-
-      return () => clearInterval(interval);
     };
 
     fetchReport();
-  }, [token]);
+
+    return () => {
+      if (pollingInterval) clearInterval(pollingInterval);
+    };
+  }, [jobId, token]);
 
   const BRAND_NAME = process.env.NEXT_PUBLIC_BRAND_NAME ?? '사주OS';
 
@@ -107,7 +146,6 @@ export default function ReportPage() {
               </p>
             </div>
 
-            {/* 간단한 프로그레스 바 */}
             <div className="max-w-md mx-auto">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm text-gray-600">진행률</span>
@@ -135,12 +173,20 @@ export default function ReportPage() {
             <div className="text-4xl mb-3">⚠️</div>
             <h2 className="text-xl font-bold text-red-700">오류가 발생했습니다</h2>
             <p className="text-red-600 mt-2">{error}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-6 px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
-            >
-              다시 시도
-            </button>
+            <div className="mt-6 space-x-4">
+              <button
+                onClick={() => window.location.reload()}
+                className="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+              >
+                다시 시도
+              </button>
+              <button
+                onClick={() => window.location.href = '/'}
+                className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+              >
+                홈으로
+              </button>
+            </div>
           </div>
         )}
 
