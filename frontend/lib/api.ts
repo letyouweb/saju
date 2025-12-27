@@ -179,9 +179,13 @@ export interface ReportStartRequest {
 export interface ReportStartResponse {
   success: boolean;
   job_id: string;
+  token: string;  // 🔥 P0: public_token
   status: string;
   message: string;
-  poll_url: string;
+  view_url: string;  // 🔥 P0: 이메일 링크용
+  status_url: string;
+  result_url: string;
+  poll_url: string;  // 레거시 호환
 }
 
 export interface ReportViewResponse {

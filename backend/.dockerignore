@@ -11,3 +11,6 @@ README.md
 tests/
 *.json
 !railway.json
+tool/
+fixtures/
+*.db

@@ -70,10 +70,18 @@ export default function Home() {
         throw new Error(response.message || '리포트 생성 시작 실패');
       }
 
-      // Report ID 저장 → localStorage에도 저장 (재접속 복구용)
+      // 🔥 P0 수정: job_id + token 모두 저장
       setReportId(response.job_id);
       localStorage.setItem('sajuos_report_id', response.job_id);
+      localStorage.setItem('sajuos_report_token', response.token);  // 🔥 핵심
       localStorage.setItem('sajuos_report_email', formData.email);
+      
+      // 🔥 디버그 로그
+      console.log('[SajuOS] Report started:', {
+        job_id: response.job_id,
+        token: response.token?.slice(0, 8) + '...',
+        view_url: response.view_url
+      });
       
       setStep('generating');
 

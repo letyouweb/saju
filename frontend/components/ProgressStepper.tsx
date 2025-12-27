@@ -107,7 +107,10 @@ export function useReportPolling(
   const fetchStatus = useCallback(async () => {
     if (!reportId) return;
     
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    // 🔥 P0 수정: api.sajuos.com 절대주소
+    const apiUrl = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+      ? 'https://api.sajuos.com'
+      : (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000');
     
     try {
       const response = await fetch(`${apiUrl}/api/v1/reports/${reportId}/status`);  // 🔥 통일

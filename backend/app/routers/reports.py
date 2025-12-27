@@ -108,12 +108,17 @@ async def start_report(
             
             background_tasks.add_task(run_report_job, job_id, rulestore)
             
+            # 🔥 P0 수정: 표준화된 응답 형식
             return {
                 "success": True,
                 "job_id": job_id,
+                "token": public_token,  # 🔥 프론트에서 localStorage 저장용
                 "status": "queued",
                 "message": "리포트 생성이 시작되었습니다.",
-                "poll_url": f"/api/reports/{job_id}"
+                "view_url": f"https://sajuos.com/report/{job_id}?token={public_token}",
+                "status_url": f"https://api.sajuos.com/api/v1/reports/{job_id}/status",
+                "result_url": f"https://api.sajuos.com/api/v1/reports/{job_id}/result",
+                "poll_url": f"/api/v1/reports/{job_id}"  # 레거시 호환
             }
         except Exception as e:
             logger.error(f"Job 생성 실패: {e}")
